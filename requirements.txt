@@ -1,0 +1,27 @@
+# RUNTIME DEPENDENCIES (Required for running the application)
+# Core PDF Processing
+pikepdf==10.5.1
+pypdfium2==5.7.1
+
+# Cryptographic primitives for fast password verification (AES/RC4).
+# BSD-licensed. Revisions 2-4 fall back to a pure-Python RC4 if absent;
+# revision 6 (AES-256) requires an AES backend (pycryptodome or cryptography).
+pycryptodome==3.23.0
+
+# Image Processing
+Pillow==12.2.0
+
+# UI and Theming
+ttkthemes==3.2.2
+tkinterdnd2==0.4.3
+
+# Document Generation (for reports/export)
+reportlab==4.4.10
+
+# DEVELOPMENT DEPENDENCIES (Only required for building/development)
+# Internationalization tools (for updating/compiling translations)
+Babel==2.18.0
+
+# Build tools (for creating executable)
+pyinstaller==6.19.0
+nuitka==4.1.3

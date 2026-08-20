@@ -1,0 +1,15 @@
+# RUNTIME DEPENDENCIES ONLY
+# These are the minimum required packages for running Unite Docs
+
+# Core PDF Processing
+pikepdf==9.10.2
+pypdfium2==4.30.0
+
+# Image Processing  
+Pillow==11.3.0
+
+# UI and Theming
+ttkthemes==3.2.2
+
+# Document Generation (for reports/export)
+reportlab==4.4.3

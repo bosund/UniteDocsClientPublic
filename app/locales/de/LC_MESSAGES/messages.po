@@ -1,0 +1,577 @@
+# German translations for PROJECT.
+# Copyright (C) 2025 ORGANIZATION
+# This file is distributed under the same license as the PROJECT project.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2025.
+#
+msgid ""
+msgstr ""
+"Project-Id-Version: PROJECT VERSION\n"
+"Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
+"POT-Creation-Date: 2026-07-09 10:57+0200\n"
+"PO-Revision-Date: 2025-08-08 21:53+0200\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: de\n"
+"Language-Team: de <LL@li.org>\n"
+"Plural-Forms: nplurals=2; plural=(n != 1);\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: app/main_app.py:163
+msgid "Ikon Fejl"
+msgstr "Symbolfehler"
+
+#: app/main_app.py:164
+#, python-format
+msgid "Kunne ikke indlæse ikonet: %s"
+msgstr "Symbol konnte nicht geladen werden: %s"
+
+#: app/main_app.py:165
+msgid "Kontroller at filen eksisterer i 'icons'-mappen og er en gyldig billedfil."
+msgstr ""
+"Stellen Sie sicher, dass die Datei im Ordner 'icons' vorhanden und eine "
+"gültige Bilddatei ist."
+
+#: app/main_app.py:166
+#, python-format
+msgid "Systemfejl: %s"
+msgstr "Systemfehler: %s"
+
+#: app/main_app.py:244
+msgid "Krypteret"
+msgstr "Verschlüsselt"
+
+#: app/main_app.py:245
+msgid "Dekrypteret"
+msgstr "Entschlüsselt"
+
+#: app/main_app.py:246
+msgid "Ikke krypteret"
+msgstr "Nicht verschlüsselt"
+
+#: app/main_app.py:247
+msgid "Billede/Andet"
+msgstr "Bild/Andere"
+
+#: app/main_app.py:248
+msgid "Fejl/Ukendt"
+msgstr "Fehler/Unbekannt"
+
+#: app/main_app.py:249
+msgid "Ukendt"
+msgstr "Unbekannt"
+
+#: app/main_app.py:300
+msgid "Initialiserer..."
+msgstr "Initialisierung..."
+
+#: app/main_app.py:366
+#, python-format
+msgid "Behandler fil %s af %s..."
+msgstr "Verarbeite Datei %s von %s..."
+
+#: app/main_app.py:412
+msgid "Filfunktioner"
+msgstr "Dateifunktionen"
+
+#: app/main_app.py:414
+msgid "Tilføj filer"
+msgstr "Dateien hinzufügen"
+
+#: app/main_app.py:415 app/main_app.py:673
+msgid "Split sider"
+msgstr "Seiten aufteilen"
+
+#: app/main_app.py:416
+msgid "Flet og gem"
+msgstr "Zusammenführen und speichern"
+
+#: app/main_app.py:417
+msgid "Gem enkeltfiler"
+msgstr "Einzelne Dateien speichern"
+
+#: app/main_app.py:424
+msgid "Roter fil"
+msgstr "Datei drehen"
+
+#: app/main_app.py:426
+msgid "Venstre"
+msgstr "Links"
+
+#: app/main_app.py:427
+msgid "Højre"
+msgstr "Rechts"
+
+#: app/main_app.py:434
+msgid "Filrækkefølge"
+msgstr "Dateireihenfolge"
+
+#: app/main_app.py:443
+msgid "Omvendt"
+msgstr "Umkehren"
+
+#: app/main_app.py:445
+msgid "Slet side"
+msgstr "Seite löschen"
+
+#: app/main_app.py:452 app/main_app.py:454 app/main_app.py:1413
+#: app/main_app.py:1452
+msgid "Indstillinger"
+msgstr "Einstellungen"
+
+#: app/main_app.py:469
+msgid "Mini"
+msgstr "Mini"
+
+#: app/main_app.py:470
+msgid "Filnavn"
+msgstr "Dateiname"
+
+#: app/main_app.py:471
+msgid "Sider"
+msgstr "Seiten"
+
+#: app/main_app.py:472
+msgid "Status"
+msgstr "Status"
+
+#: app/main_app.py:473
+msgid "Oprettelsesdato"
+msgstr "Erstellungsdatum"
+
+#: app/main_app.py:519
+msgid "Adgangskoder"
+msgstr "Passwörter"
+
+#: app/main_app.py:522
+msgid "Bruges til at åbne krypterede PDF'er."
+msgstr "Wird zum Öffnen verschlüsselter PDFs verwendet."
+
+#: app/main_app.py:534 app/main_app.py:1157
+msgid "Tjek kodeliste"
+msgstr "Passwortliste prüfen"
+
+#: app/main_app.py:535 app/main_app.py:1288
+msgid "Gæt kodeord"
+msgstr "Passwort erraten"
+
+#: app/main_app.py:537
+msgid "Forside"
+msgstr "Deckblatt"
+
+#: app/main_app.py:540
+msgid "Tilføj forside med overskrift"
+msgstr "Deckblatt mit Überschrift hinzufügen"
+
+#: app/main_app.py:669
+msgid "Vis / rediger"
+msgstr "Anzeigen / bearbeiten"
+
+#: app/main_app.py:671 app/preview_window.py:74
+msgid "Roter venstre"
+msgstr "Links drehen"
+
+#: app/main_app.py:672 app/preview_window.py:75
+msgid "Roter højre"
+msgstr "Rechts drehen"
+
+#: app/main_app.py:675
+msgid "Slet side(er)"
+msgstr "Seite(n) löschen"
+
+#: app/main_app.py:759
+msgid "Understøttede filer"
+msgstr "Unterstützte Dateien"
+
+#: app/main_app.py:759 app/main_app.py:1087
+msgid "PDF-filer"
+msgstr "PDF-Dateien"
+
+#: app/main_app.py:760
+msgid "Billedfiler"
+msgstr "Bilddateien"
+
+#: app/main_app.py:958 app/main_app.py:964 app/main_app.py:970
+msgid "Split PDF"
+msgstr "PDF teilen"
+
+#: app/main_app.py:958
+msgid "Vælg venligst én PDF-fil for at splitte den."
+msgstr "Bitte wählen Sie eine PDF-Datei zum Teilen aus."
+
+#: app/main_app.py:964
+msgid "Kun PDF-filer kan splittes."
+msgstr "Nur PDF-Dateien können geteilt werden."
+
+#: app/main_app.py:970
+msgid "Denne PDF har kun én side og kan ikke splittes."
+msgstr "Diese PDF hat nur eine Seite und kann nicht geteilt werden."
+
+#: app/main_app.py:974
+msgid "Splitter PDF"
+msgstr "PDF wird geteilt"
+
+#: app/main_app.py:974
+#, python-format
+msgid "Forbereder at splitte %s sider..."
+msgstr "Vorbereitung zum Teilen von %s Seiten..."
+
+#: app/main_app.py:981
+msgid "Kunne ikke åbne PDF'en (måske forkert adgangskode?)."
+msgstr "PDF konnte nicht geöffnet werden (vielleicht falsches Passwort?)."
+
+#: app/main_app.py:1001
+msgid "Fejl ved split"
+msgstr "Fehler beim Teilen"
+
+#: app/main_app.py:1001
+#, python-format
+msgid ""
+"Der opstod en fejl:\n"
+"%s"
+msgstr ""
+"Ein Fehler ist aufgetreten:\n"
+"%s"
+
+#: app/main_app.py:1033 app/main_app.py:1082
+msgid "Gem"
+msgstr "Speichern"
+
+#: app/main_app.py:1033
+msgid "Ingen PDF-filer at gemme."
+msgstr "Keine PDF-Dateien zum Speichern."
+
+#: app/main_app.py:1036
+msgid "Vælg mappe til at gemme filer"
+msgstr "Ordner zum Speichern von Dateien auswählen"
+
+#: app/main_app.py:1043
+msgid "Gemmer PDF'er"
+msgstr "PDFs speichern"
+
+#: app/main_app.py:1043
+#, python-format
+msgid "Forbereder at gemme %s filer..."
+msgstr "Bereite das Speichern von %s Dateien vor..."
+
+#: app/main_app.py:1082
+#, python-format
+msgid "%s PDF-filer gemt."
+msgstr "%s PDF-Dateien gespeichert."
+
+#: app/main_app.py:1086
+msgid "Ingen filer"
+msgstr "Keine Dateien"
+
+#: app/main_app.py:1086
+msgid "Tilføj filer først"
+msgstr "Zuerst Dateien hinzufügen"
+
+#: app/main_app.py:1090
+msgid "Fletter PDF'er"
+msgstr "PDFs werden zusammengeführt"
+
+#: app/main_app.py:1090
+#, python-format
+msgid "Forbereder at flette %s filer..."
+msgstr "Vorbereitung zum Zusammenführen von %s Dateien..."
+
+#: app/main_app.py:1145
+msgid "Fletning fuldført"
+msgstr "Zusammenführung abgeschlossen"
+
+#: app/main_app.py:1146
+#, python-format
+msgid ""
+"PDF gemt som:\n"
+"%(path)s\n"
+"\n"
+"%(ok)s filer behandlet korrekt\n"
+"%(fail)s filer fejlede"
+msgstr ""
+"PDF gespeichert als:\n"
+"%(path)s\n"
+"\n"
+"%(ok)s Dateien korrekt verarbeitet\n"
+"%(fail)s Dateien fehlgeschlagen"
+
+#: app/main_app.py:1152 app/main_app.py:1275 app/main_app.py:1454
+#: app/main_app.py:1456 app/main_app.py:1515 app/main_app.py:1595
+#: app/main_app.py:1641 app/main_app.py:1709
+msgid "Fejl"
+msgstr "Fehler"
+
+#: app/main_app.py:1152
+#, python-format
+msgid ""
+"Kunne ikke gemme filen:\n"
+"%s"
+msgstr ""
+"Datei konnte nicht gespeichert werden:\n"
+"%s"
+
+#: app/main_app.py:1157 app/main_app.py:1288
+msgid "Der er ingen krypterede PDF-filer på listen."
+msgstr "Keine verschlüsselten PDF-Dateien in der Liste."
+
+#: app/main_app.py:1161
+msgid "Tjekker kodeord fra liste"
+msgstr "Passwörter aus Liste werden geprüft"
+
+#: app/main_app.py:1184 app/main_app.py:1320
+msgid "Vent..."
+msgstr "Bitte warten..."
+
+#: app/main_app.py:1187 app/main_app.py:1324
+msgid "Stop"
+msgstr "Stopp"
+
+#: app/main_app.py:1193 app/main_app.py:1331
+msgid "Luk"
+msgstr "Schließen"
+
+#: app/main_app.py:1222 app/main_app.py:1401
+#, python-format
+msgid "Fundet: %s"
+msgstr "Gefunden: %s"
+
+#: app/main_app.py:1226 app/main_app.py:1405
+msgid "Ikke fundet"
+msgstr "Nicht gefunden"
+
+#: app/main_app.py:1235
+msgid "Vælg metode"
+msgstr "Methode auswählen"
+
+#: app/main_app.py:1246
+msgid "Vælg type af gætning:"
+msgstr "Ratetyp auswählen:"
+
+#: app/main_app.py:1254
+msgid "Numerisk (korte koder)"
+msgstr "Numerisch (kurze Codes)"
+
+#: app/main_app.py:1260
+msgid "Antal cifre:"
+msgstr "Anzahl der Ziffern:"
+
+#: app/main_app.py:1275
+msgid "Vælg mindst én metode."
+msgstr "Mindestens eine Methode auswählen."
+
+#: app/main_app.py:1282
+msgid "Start"
+msgstr "Start"
+
+#: app/main_app.py:1283 app/preview_window.py:86
+msgid "Annuller"
+msgstr "Abbrechen"
+
+#: app/main_app.py:1293
+msgid "Gæt / Tjek kodeord"
+msgstr "Passwort erraten / prüfen"
+
+#: app/main_app.py:1386
+#, python-format
+msgid "Numerisk (max %s)..."
+msgstr "Numerisch (max %s)..."
+
+#: app/main_app.py:1434
+msgid "Kodeordsgætning"
+msgstr "Passwort-Erratung"
+
+#: app/main_app.py:1437
+msgid "Maksimal længde på kodeord der skal gættes:"
+msgstr "Maximale Länge des zu erratenden Passworts:"
+
+#: app/main_app.py:1452
+msgid "Maksimal kodeordslængde er gemt."
+msgstr "Maximale Passwortlänge ist gespeichert."
+
+#: app/main_app.py:1454
+msgid "Længden skal være mellem 1 og 10."
+msgstr "Die Länge muss zwischen 1 und 10 liegen."
+
+#: app/main_app.py:1456
+msgid "Ugyldig værdi for længde."
+msgstr "Ungültiger Wert für die Länge."
+
+#: app/main_app.py:1458
+msgid "Gem længde"
+msgstr "Länge speichern"
+
+#: app/main_app.py:1462
+msgid "Sprog"
+msgstr "Sprache"
+
+#: app/main_app.py:1465
+msgid "Vælg sprog:"
+msgstr "Sprache auswählen:"
+
+#: app/main_app.py:1488
+msgid "Sprog gemt"
+msgstr "Sprache gespeichert"
+
+#: app/main_app.py:1489
+msgid ""
+"Sprogindstillingen er gemt. Ændringerne vil blive anvendt, når du lukker "
+"dette vindue."
+msgstr ""
+"Spracheinstellung gespeichert. Änderungen werden angewendet, wenn Sie "
+"dieses Fenster schließen."
+
+#: app/main_app.py:1493
+msgid "Gem sprog"
+msgstr "Sprache speichern"
+
+#: app/main_app.py:1497 app/main_app.py:1711
+msgid "Cache"
+msgstr "Cache"
+
+#: app/main_app.py:1500
+msgid "Slet gemte kodeord"
+msgstr "Gespeicherte Passwörter löschen"
+
+#: app/main_app.py:1503
+msgid "Windows integration"
+msgstr "Windows-Integration"
+
+#: app/main_app.py:1520
+msgid "Tilføj 'Flet med UniteDocs' til højreklik-menu for PDF-filer"
+msgstr ""
+"'Mit UniteDocs zusammenführen' zum Rechtsklick-Menü für PDF-Dateien "
+"hinzufügen"
+
+#: app/main_app.py:1526 app/main_app.py:1578
+msgid "Log"
+msgstr ""
+
+#: app/main_app.py:1531
+msgid "Logfilen kan hjælpe med fejlfinding."
+msgstr ""
+
+#: app/main_app.py:1547
+msgid "Download log"
+msgstr ""
+
+#: app/main_app.py:1549
+msgid "Send log via e-mail"
+msgstr ""
+
+#: app/main_app.py:1578
+msgid "Der er ingen logfil endnu."
+msgstr ""
+
+#: app/main_app.py:1583
+#, fuzzy
+msgid "Gem logfil"
+msgstr "Einzelne Dateien speichern"
+
+#: app/main_app.py:1586
+#, fuzzy
+msgid "Logfiler"
+msgstr "Keine Dateien"
+
+#: app/main_app.py:1586
+#, fuzzy
+msgid "Alle filer"
+msgstr "Bilddateien"
+
+#: app/main_app.py:1595
+#, fuzzy, python-format
+msgid "Kunne ikke gemme logfilen: %s"
+msgstr ""
+"Datei konnte nicht gespeichert werden:\n"
+"%s"
+
+#: app/main_app.py:1614
+#, fuzzy
+msgid "(ingen logfil endnu)"
+msgstr "Keine Dateien"
+
+#: app/main_app.py:1627
+#, python-format
+msgid "UniteDocs log - version %s"
+msgstr ""
+
+#: app/main_app.py:1629
+msgid "Beskriv venligst problemet her:"
+msgstr ""
+
+#: app/main_app.py:1631
+msgid "--- Seneste log ---"
+msgstr ""
+
+#: app/main_app.py:1641
+#, fuzzy, python-format
+msgid "Kunne ikke åbne e-mailprogrammet: %s"
+msgstr "Symbol konnte nicht geladen werden: %s"
+
+#: app/main_app.py:1707
+msgid "Cache slettet"
+msgstr "Cache gelöscht"
+
+#: app/main_app.py:1707
+msgid "Alle gemte kodeord er slettet."
+msgstr "Alle gespeicherten Passwörter wurden gelöscht."
+
+#: app/main_app.py:1709
+#, python-format
+msgid "Kunne ikke slette cache: %s"
+msgstr "Cache konnte nicht gelöscht werden: %s"
+
+#: app/main_app.py:1711
+msgid "Ingen kodeordscache fundet."
+msgstr "Kein Passwort-Cache gefunden."
+
+#: app/preview_window.py:22
+msgid "Vis fil"
+msgstr "Datei anzeigen"
+
+#: app/preview_window.py:72
+msgid "Zoom +"
+msgstr "Zoom +"
+
+#: app/preview_window.py:73
+msgid "Zoom -"
+msgstr "Zoom -"
+
+#: app/preview_window.py:80
+msgid "Beskær"
+msgstr "Zuschneiden"
+
+#: app/preview_window.py:82
+msgid "Fjern beskæring"
+msgstr "Zuschnitt entfernen"
+
+#: app/preview_window.py:85
+msgid "Ok"
+msgstr "Ok"
+
+#: app/preview_window.py:99
+msgid "Filen kunne ikke forhåndsvises"
+msgstr "Datei konnte nicht vorgeschaut werden"
+
+#: app/preview_window.py:99
+msgid "Måske en krypteret PDF"
+msgstr "Möglicherweise eine verschlüsselte PDF"
+
+#~ msgid "Genstart påkrævet"
+#~ msgstr "Neustart erforderlich"
+
+#~ msgid ""
+#~ "Programmet skal genstartes for at "
+#~ "sprogændringerne kan træde i kraft. Vil"
+#~ " du genstarte nu?"
+#~ msgstr ""
+#~ "Das Programm muss neu gestartet werden,"
+#~ " damit die Sprachänderungen wirksam werden."
+#~ " Möchten Sie jetzt neu starten?"
+
+#~ msgid "Gem"
+#~ msgstr "Speichern"
+
+#~ msgid "Info: 'icon.ico' not found. Using default icon."
+#~ msgstr "Info: 'icon.ico' nicht gefunden. Standard-Symbol wird verwendet."
+
