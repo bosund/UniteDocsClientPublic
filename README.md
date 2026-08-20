@@ -1,106 +1,49 @@
-# Unite Docs - PDF Management Application
+# 🛡️ Unite Docs - Secure PDF Anonymization
 
-## 🌍 Internationalization (Important for Developers)
+**Unite Docs** is a powerful, locally-run desktop application designed to securely and automatically anonymize PDF documents. It completely removes sensitive personal information (GDPR data) from your files in minutes, saving you hours of manual work and ensuring total compliance.
 
-**This project uses dynamic internationalization with 8 supported languages.**
+---
 
-### For AI Assistants and Developers:
-- **ALWAYS** wrap user-visible text in `_("text")` function
-- **NEVER** use f-strings inside `_()`: `_(f"text {var}")` ❌
-- **USE** format strings: `_("text %s") % var` ✅
+## 🛑 The Problem with "Black Boxes"
+When you draw a black box over text in standard PDF editors, the underlying text often remains. Anyone can simply highlight the box, press "Copy", and read the hidden data. To truly anonymize a document, professionals often resort to printing and scanning pages—a slow, error-prone, and frustrating process.
 
-### Quick Setup for New Translatable Strings:
-```bash
-# 1. Add _("new text") to your code
-# 2. Extract new strings
-python update_locales.py
+## 💡 The Solution: True Redaction
+Unite Docs changes the game. It **finds and permanently removes** the underlying text from the document. The data isn't just covered; it's gone. 
 
-# 3. Add translations in app/locales/*/LC_MESSAGES/messages.po files
-# 4. Compile translations
-python compile_locales.py
-```
+### Key Features:
+- 🕵️ **Smart Detection:** Automatically finds CPR numbers (with validation), email addresses, and phone numbers.
+- 🎯 **Custom Keywords:** Enter specific names, employee numbers, or addresses, and the tool will find and remove every instance across hundreds of pages instantly.
+- 🔒 **100% Local & Secure:** Your files never leave your computer. There are no servers, no cloud uploads, and no logs. Total privacy guaranteed.
+- 🧹 **Metadata Cleaning:** Automatically strips author names and other hidden metadata from the final PDF.
+- 🌍 **Multi-language Support:** Fully translated into 8 languages (Danish, English, German, French, Spanish, Dutch, Swedish, Norwegian).
 
-### Supported Languages:
-- Danish (da)
-- English (en) 
-- German (de)
-- French (fr)
-- Spanish (es)
-- Dutch (nl)
-- Swedish (sv)
-- Norwegian (nb_NO)
+---
 
-### Key Files:
-- `docs/AI_INTERNATIONALIZATION_GUIDE.md` - Complete guide for AI assistants
-- `docs/translation_workflow.md` - Human-readable workflow
-- `update_translations.bat` - Automated workflow
-- `app/localization.py` - Language management
+## 📥 Getting Started
 
-## Development
+Unite Docs is built with Python. To run it locally on your machine:
 
-### Prerequisites:
+### Prerequisites
 - Python 3.11+
-- Required packages: `pip install -r requirements.txt`
-- Babel for translations: `pip install babel`
+- Git
 
-### Running:
+### Installation
 ```bash
-cd client
-python unitedocs.py
-```
-# Unite Docs - PDF Management Application
+# Clone the repository
+git clone https://github.com/bosund/UniteDocsClientPublic.git
+cd UniteDocsClientPublic
 
-## 🌍 Internationalization (Important for Developers)
+# Install dependencies
+pip install -r requirements.txt
 
-**This project uses dynamic internationalization with 8 supported languages.**
-
-### For AI Assistants and Developers:
-- **ALWAYS** wrap user-visible text in `_("text")` function
-- **NEVER** use f-strings inside `_()`: `_(f"text {var}")` ❌
-- **USE** format strings: `_("text %s") % var` ✅
-
-### Quick Setup for New Translatable Strings:
-```bash
-# 1. Add _("new text") to your code
-# 2. Extract new strings
-python update_locales.py
-
-# 3. Add translations in app/locales/*/LC_MESSAGES/messages.po files
-# 4. Compile translations
-python compile_locales.py
-```
-
-### Supported Languages:
-- Danish (da)
-- English (en) 
-- German (de)
-- French (fr)
-- Spanish (es)
-- Dutch (nl)
-- Swedish (sv)
-- Norwegian (nb_NO)
-
-### Key Files:
-- `docs/AI_INTERNATIONALIZATION_GUIDE.md` - Complete guide for AI assistants
-- `docs/translation_workflow.md` - Human-readable workflow
-- `update_translations.bat` - Automated workflow
-- `app/localization.py` - Language management
-
-## Development
-
-### Prerequisites:
-- Python 3.11+
-- Required packages: `pip install -r requirements.txt`
-- Babel for translations: `pip install babel`
-
-### Running:
-```bash
-cd client
+# Run the application
 python unitedocs.py
 ```
 
-### Translation Management:
-See `docs/AI_INTERNATIONALIZATION_GUIDE.md` for complete internationalization workflow.
+## 🛠️ For Developers
+Unite Docs is open for community contributions. If you want to add new features or translations, here is a quick guide:
+
+- **Adding Translations:** We use `babel` for i18n. Always wrap user-visible text in `_("text")`. Use `python update_locales.py` to extract strings and `python compile_locales.py` to compile them. See `docs/AI_INTERNATIONALIZATION_GUIDE.md` for details.
 
 ---
 
