@@ -1,27 +1,28 @@
-# 🛡️ Unite Docs - Secure PDF Anonymization
+# 📄 Unite Docs - The Ultimate PDF Merger & Manager
 
-**Unite Docs** is a powerful, locally-run desktop application designed to securely and automatically anonymize PDF documents. It completely removes sensitive personal information (GDPR data) from your files in minutes, saving you hours of manual work and ensuring total compliance.
+**Unite Docs** is a powerful, locally-run desktop application for Windows that makes managing, merging, and splitting PDFs and images incredibly easy.
+
+Whether you're combining hundreds of documents, splitting large files, or dealing with password-protected PDFs, Unite Docs handles it seamlessly.
 
 ---
 
-## 🛑 The Problem with "Black Boxes"
-When you draw a black box over text in standard PDF editors, the underlying text often remains. Anyone can simply highlight the box, press "Copy", and read the hidden data. To truly anonymize a document, professionals often resort to printing and scanning pages—a slow, error-prone, and frustrating process.
+## 🌟 Why Choose Unite Docs?
 
-## 💡 The Solution: True Redaction
-Unite Docs changes the game. It **finds and permanently removes** the underlying text from the document. The data isn't just covered; it's gone. 
+Most PDF tools struggle when you try to merge multiple password-protected files, or when you mix PDFs with images. Unite Docs is built specifically to solve these frustrations.
 
-### Key Features:
-- 🕵️ **Smart Detection:** Automatically finds CPR numbers (with validation), email addresses, and phone numbers.
-- 🎯 **Custom Keywords:** Enter specific names, employee numbers, or addresses, and the tool will find and remove every instance across hundreds of pages instantly.
-- 🔒 **100% Local & Secure:** Your files never leave your computer. There are no servers, no cloud uploads, and no logs. Total privacy guaranteed.
-- 🧹 **Metadata Cleaning:** Automatically strips author names and other hidden metadata from the final PDF.
+### Core Features:
+- 📑 **Advanced Merging & Splitting:** Effortlessly merge many PDFs and image files together, or split large PDFs into smaller parts.
+- 🔐 **Unique Password Handling:** Merging multiple files with *different* passwords? No problem. Unite Docs can handle multiple passwords in the same merge—a feature you won't find in standard tools!
+- 🤖 **Smart Password Guesser:** Forgot a short numerical password? The built-in password guesser can automatically crack and decrypt short numerical passwords for you.
+- ✂️ **Edit & Organize:** Rotate, crop, and preview your PDF pages directly in the app.
+- 🖥️ **Windows Shell Integration:** Right-click files in Windows Explorer to instantly open them in Unite Docs.
 - 🌍 **Multi-language Support:** Fully translated into 8 languages (Danish, English, German, French, Spanish, Dutch, Swedish, Norwegian).
 
 ---
 
 ## 📥 Getting Started
 
-Unite Docs is built with Python. To run it locally on your machine:
+Unite Docs is built with Python and a Tkinter GUI. To run it locally on your machine:
 
 ### Prerequisites
 - Python 3.11+
