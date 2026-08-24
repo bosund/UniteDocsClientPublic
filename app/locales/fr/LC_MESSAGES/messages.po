@@ -7,7 +7,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: PROJECT VERSION\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2026-07-09 10:57+0200\n"
+"POT-Creation-Date: 2026-08-24 02:15+0200\n"
 "PO-Revision-Date: 2025-08-08 21:53+0200\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: fr\n"
@@ -18,291 +18,662 @@ msgstr ""
 "Content-Transfer-Encoding: 8bit\n"
 "Generated-By: Babel 2.18.0\n"
 
-#: app/main_app.py:163
-msgid "Ikon Fejl"
-msgstr "Erreur d'icône"
+#: app/export_formats.py:83
+msgid "PDF"
+msgstr "PDF"
 
-#: app/main_app.py:164
+#: app/export_formats.py:84
+msgid "Markdown (.md)"
+msgstr "Markdown (.md)"
+
+#: app/export_formats.py:85
+msgid "ePub (.epub)"
+msgstr "ePub (.epub)"
+
+#: app/export_formats.py:86
+msgid "Ren tekst (.txt)"
+msgstr "Texte brut (.txt)"
+
+#: app/export_formats.py:93 app/main_app.py:1614
+msgid "PDF-filer"
+msgstr "Fichiers PDF"
+
+#: app/export_formats.py:94
+msgid "Markdown-filer"
+msgstr "Fichiers Markdown"
+
+#: app/export_formats.py:95
+msgid "ePub-filer"
+msgstr "Fichiers ePub"
+
+#: app/export_formats.py:96
+msgid "Tekstfiler"
+msgstr "Fichiers texte"
+
+#: app/export_formats.py:141
 #, python-format
-msgid "Kunne ikke indlæse ikonet: %s"
-msgstr "Impossible de charger l'icône : %s"
-
-#: app/main_app.py:165
-msgid "Kontroller at filen eksisterer i 'icons'-mappen og er en gyldig billedfil."
+msgid ""
+"[Side %s: teksten kunne ikke udtrækkes — siden er sandsynligvis en "
+"scanning uden tekstlag og er derfor ikke med her.]"
 msgstr ""
-"Vérifiez que le fichier existe dans le dossier « icons » et qu'il s'agit "
-"d'un fichier image valide."
+"[Page %s : le texte n'a pas pu être extrait — la page est probablement un"
+" scan sans couche de texte et n'est donc pas incluse ici.]"
 
-#: app/main_app.py:166
+#: app/export_formats.py:400
 #, python-format
-msgid "Systemfejl: %s"
-msgstr "Erreur système : %s"
+msgid ""
+"Bemærk: %s side(r) i dette dokument indeholder ingen tekst der kunne "
+"udtrækkes. De er markeret i teksten nedenfor."
+msgstr ""
+"Remarque : %s page(s) de ce document ne contiennent aucun texte "
+"extractible. Elles sont signalées dans le texte ci-dessous."
 
-#: app/main_app.py:244
-msgid "Krypteret"
-msgstr "Chiffré"
+#: app/export_formats.py:599
+#, python-format
+msgid "Ukendt format: %s"
+msgstr "Format inconnu : %s"
 
-#: app/main_app.py:245
-msgid "Dekrypteret"
-msgstr "Déchiffré"
+#: app/export_formats.py:611
+msgid ""
+"Der blev ikke fundet nogen tekst i dokumentet. Filen er sandsynligvis en "
+"scanning uden tekstlag."
+msgstr ""
+"Aucun texte n'a été trouvé dans le document. Le fichier est probablement "
+"un scan sans couche de texte."
 
-#: app/main_app.py:246
-msgid "Ikke krypteret"
-msgstr "Non chiffré"
+#: app/export_formats.py:634 app/save_pipeline.py:189
+#, python-format
+msgid "[Filen %s kunne ikke åbnes.]"
+msgstr "[Le fichier %s n'a pas pu être ouvert.]"
 
-#: app/main_app.py:247
-msgid "Billede/Andet"
-msgstr "Image/Autre"
+#: app/main_app.py:205
+msgid "Søger allerede efter opdateringer…"
+msgstr "Recherche de mises à jour déjà en cours…"
 
-#: app/main_app.py:248
-msgid "Fejl/Ukendt"
-msgstr "Erreur/Inconnu"
+#: app/main_app.py:226
+msgid "Søger efter opdateringer…"
+msgstr "Recherche de mises à jour…"
 
-#: app/main_app.py:249
-msgid "Ukendt"
-msgstr "Inconnu"
+#: app/main_app.py:253 app/main_app.py:259
+msgid "Opdatering"
+msgstr "Mise à jour"
 
-#: app/main_app.py:300
+#: app/main_app.py:254
+#, python-format
+msgid ""
+"Kunne ikke kontakte serveren:\n"
+"%s"
+msgstr ""
+"Impossible de contacter le serveur :\n"
+"%s"
+
+#: app/main_app.py:260
+#, python-format
+msgid "Du kører allerede den nyeste version (%s)."
+msgstr "Vous utilisez déjà la version la plus récente (%s)."
+
+#: app/main_app.py:272
+#, python-format
+msgid "Version %s springes over."
+msgstr "La version %s sera ignorée."
+
+#: app/main_app.py:280
+msgid "Opdatering tilgængelig"
+msgstr "Mise à jour disponible"
+
+#: app/main_app.py:289
+msgid "Der er en ny version af Unite Docs"
+msgstr "Une nouvelle version d'Unite Docs est disponible"
+
+#: app/main_app.py:292
+#, python-format
+msgid "Version %s er klar. Du kører version %s."
+msgstr "La version %s est prête. Vous utilisez la version %s."
+
+#: app/main_app.py:296
+#, python-format
+msgid "Download: %s"
+msgstr "Téléchargement : %s"
+
+#: app/main_app.py:301
+msgid "Nyt i denne version:"
+msgstr "Nouveautés de cette version :"
+
+#: app/main_app.py:322
+msgid "Opdater nu"
+msgstr "Mettre à jour maintenant"
+
+#: app/main_app.py:324
+msgid "Ikke nu"
+msgstr "Pas maintenant"
+
+#: app/main_app.py:326
+msgid "Spring denne version over"
+msgstr "Ignorer cette version"
+
+#: app/main_app.py:341
+msgid "Henter opdatering"
+msgstr "Téléchargement de la mise à jour"
+
+#: app/main_app.py:342
+#, python-format
+msgid "Henter Unite Docs %s…"
+msgstr "Téléchargement d'Unite Docs %s…"
+
+#: app/main_app.py:366
+#, python-format
+msgid "Hentet %s af %s"
+msgstr "%s téléchargés sur %s"
+
+#: app/main_app.py:369
+#, python-format
+msgid "Hentet %s"
+msgstr "%s téléchargés"
+
+#: app/main_app.py:379
+msgid "Opdatering hentet"
+msgstr "Mise à jour téléchargée"
+
+#: app/main_app.py:380
+msgid ""
+"Installationen kan kun køres fra en installeret udgave. Filen ligger her,"
+" og hentesiden er åbnet i browseren."
+msgstr ""
+"L'installation ne peut être lancée que depuis une version installée. Le "
+"fichier se trouve ici et la page de téléchargement a été ouverte dans le "
+"navigateur."
+
+#: app/main_app.py:386
+msgid "Installerer opdatering"
+msgstr "Installation de la mise à jour"
+
+#: app/main_app.py:387
+#, python-format
+msgid "Unite Docs lukker nu og åbner igen, når version %s er installeret."
+msgstr "Unite Docs va se fermer et se rouvrir une fois la version %s installée."
+
+#: app/main_app.py:394
+msgid "Installationen kunne ikke startes"
+msgstr "Impossible de lancer l'installation"
+
+#: app/main_app.py:395
+#, python-format
+msgid ""
+"Filen blev hentet, men installeren kunne ikke startes:\n"
+"%s"
+msgstr ""
+"Le fichier a été téléchargé, mais l'installateur n'a pas pu être lancé :\n"
+"%s"
+
+#: app/main_app.py:405
+msgid "Download afbrudt."
+msgstr "Téléchargement annulé."
+
+#: app/main_app.py:409
+msgid "Opdateringen kunne ikke hentes"
+msgstr "Impossible de télécharger la mise à jour"
+
+#: app/main_app.py:410
+#, python-format
+msgid ""
+"Du kan hente installeren manuelt fra hjemmesiden.\n"
+"\n"
+"%s"
+msgstr ""
+"Vous pouvez télécharger l'installateur manuellement depuis le site web.\n"
+"\n"
+"%s"
+
+#: app/main_app.py:443 app/main_app.py:837 app/main_app.py:2229
+#: app/main_app.py:2336 app/main_app.py:2830
+msgid "Luk"
+msgstr "Fermer"
+
+#: app/main_app.py:544 app/main_app.py:576 app/main_app.py:601
+#: app/main_app.py:636 app/main_app.py:648 app/main_app.py:1148
+msgid "Indsæt side"
+msgstr "Insérer une page"
+
+#: app/main_app.py:551
+msgid "Overskrift"
+msgstr "Titre"
+
+#: app/main_app.py:558 app/page_canvas.py:722 app/page_canvas.py:821
+msgid "Tekst"
+msgstr "Texte"
+
+#: app/main_app.py:577
+msgid "Skriv en overskrift eller noget tekst først."
+msgstr "Saisissez d'abord un titre ou du texte."
+
+#: app/main_app.py:585
+msgid "Indsæt"
+msgstr "Insérer"
+
+#: app/main_app.py:586 app/main_app.py:621 app/main_app.py:741
+#: app/main_app.py:948 app/main_app.py:2319 app/page_canvas.py:1067
+msgid "Annuller"
+msgstr "Annuler"
+
+#: app/main_app.py:616
+msgid "Efter"
+msgstr "Après"
+
+#: app/main_app.py:619
+msgid "Før"
+msgstr "Avant"
+
+#: app/main_app.py:636 app/main_app.py:648
+msgid "Siden kunne ikke oprettes."
+msgstr "La page n'a pas pu être créée."
+
+#: app/main_app.py:641
+msgid "Ny side"
+msgstr "Nouvelle page"
+
+#: app/main_app.py:665
+#, python-format
+msgid "Skal siden oprettes før eller efter side %s?"
+msgstr "La page doit-elle être créée avant ou après la page %s ?"
+
+#: app/main_app.py:667
+msgid "Skal siden oprettes før eller efter den markerede side?"
+msgstr "La page doit-elle être créée avant ou après la page sélectionnée ?"
+
+#: app/main_app.py:683 app/main_app.py:712
+msgid "Side indsat"
+msgstr "Page insérée"
+
+#: app/main_app.py:721
 msgid "Initialiserer..."
 msgstr "Initialisation..."
 
-#: app/main_app.py:366
+#: app/main_app.py:734
+#, python-format
+msgid "Forløbet: %s"
+msgstr "Écoulé : %s"
+
+#: app/main_app.py:745
+msgid "Annullerer…"
+msgstr "Annulation…"
+
+#: app/main_app.py:803
+#, python-format
+msgid "Kunne ikke åbne %s"
+msgstr "Impossible d'ouvrir %s"
+
+#: app/main_app.py:830
+msgid "Klik for at åbne mappen"
+msgstr "Cliquez pour ouvrir le dossier"
+
+#: app/main_app.py:830
+msgid "Klik for at åbne filen"
+msgstr "Cliquez pour ouvrir le fichier"
+
+#: app/main_app.py:909
+msgid "Vælg format"
+msgstr "Choisir le format"
+
+#: app/main_app.py:924
+msgid "Vælg outputformat:"
+msgstr "Choisissez le format de sortie :"
+
+#: app/main_app.py:932
+msgid "Tekstformater bevarer ikke billeder og layout."
+msgstr "Les formats texte ne conservent ni les images ni la mise en page."
+
+#: app/main_app.py:947 app/main_app.py:1014 app/main_app.py:2420
+#: app/page_canvas.py:1066
+msgid "OK"
+msgstr "OK"
+
+#: app/main_app.py:963 app/main_app.py:1239
+msgid "Credits"
+msgstr "Crédits"
+
+#: app/main_app.py:980
+msgid "Licens: AGPL-3.0"
+msgstr "Licence : AGPL-3.0"
+
+#: app/main_app.py:984
+msgid "Vis kildekode"
+msgstr "Voir le code source"
+
+#: app/main_app.py:990
+msgid "Anvendte biblioteker"
+msgstr "Bibliothèques utilisées"
+
+#: app/main_app.py:1022
+#, python-format
+msgid "Konverterer til %s..."
+msgstr "Conversion en %s..."
+
+#: app/main_app.py:1028
+msgid "Gør scannede sider søgbare (OCR)..."
+msgstr "Rendre les pages numérisées consultables (OCR)..."
+
+#: app/main_app.py:1034
 #, python-format
 msgid "Behandler fil %s af %s..."
 msgstr "Traitement du fichier %s sur %s..."
 
-#: app/main_app.py:412
-msgid "Filfunktioner"
-msgstr "Fonctions de fichier"
+#: app/main_app.py:1049
+#, python-format
+msgid "ca. %s tilbage"
+msgstr "environ %s restant"
 
-#: app/main_app.py:414
+#: app/main_app.py:1051
+#, python-format
+msgid "Konverterer side %(d)s af %(t)s"
+msgstr "Conversion de la page %(d)s sur %(t)s"
+
+#: app/main_app.py:1069 app/main_app.py:1073 app/main_app.py:1598
+msgid "Annulleret"
+msgstr "Annulé"
+
+#: app/main_app.py:1069 app/main_app.py:1073 app/main_app.py:1598
+msgid "Eksporten blev annulleret."
+msgstr "L'exportation a été annulée."
+
+#: app/main_app.py:1111
 msgid "Tilføj filer"
 msgstr "Ajouter des fichiers"
 
-#: app/main_app.py:415 app/main_app.py:673
-msgid "Split sider"
-msgstr "Diviser les pages"
-
-#: app/main_app.py:416
+#: app/main_app.py:1112
 msgid "Flet og gem"
 msgstr "Fusionner et enregistrer"
 
-#: app/main_app.py:417
+#: app/main_app.py:1113
 msgid "Gem enkeltfiler"
 msgstr "Enregistrer les fichiers individuels"
 
-#: app/main_app.py:424
-msgid "Roter fil"
-msgstr "Faire pivoter le fichier"
-
-#: app/main_app.py:426
+#: app/main_app.py:1117
 msgid "Venstre"
 msgstr "Gauche"
 
-#: app/main_app.py:427
+#: app/main_app.py:1118
 msgid "Højre"
 msgstr "Droite"
 
-#: app/main_app.py:434
-msgid "Filrækkefølge"
-msgstr "Ordre des fichiers"
+#: app/main_app.py:1119
+msgid "Beskær"
+msgstr "Recadrer"
 
-#: app/main_app.py:443
-msgid "Omvendt"
-msgstr "Inverser"
+#: app/main_app.py:1125
+msgid "Træk en ramme for at beskære den viste side"
+msgstr "Tracez un cadre pour rogner la page affichée"
 
-#: app/main_app.py:445
-msgid "Slet side"
-msgstr "Supprimer la page"
+#: app/main_app.py:1136
+msgid "Flyt op"
+msgstr "Monter"
 
-#: app/main_app.py:452 app/main_app.py:454 app/main_app.py:1413
-#: app/main_app.py:1452
+#: app/main_app.py:1137
+msgid "Flyt ned"
+msgstr "Descendre"
+
+#: app/main_app.py:1138
+msgid "Flyt øverst"
+msgstr "Placer en haut"
+
+#: app/main_app.py:1139
+msgid "Flyt nederst"
+msgstr "Placer en bas"
+
+#: app/main_app.py:1141
+msgid "Sorter"
+msgstr "Trier"
+
+#: app/main_app.py:1147
+msgid "Sortér filerne"
+msgstr "Trier les fichiers"
+
+#: app/main_app.py:1149
+msgid "Indsæt en ny side med overskrift og tekst"
+msgstr "Insérer une nouvelle page avec un titre et du texte"
+
+#: app/main_app.py:1150
+msgid "Slet"
+msgstr "Supprimer"
+
+#: app/main_app.py:1156 app/main_app.py:1159
+msgid "Fortryd"
+msgstr "Annuler"
+
+#: app/main_app.py:1163 app/main_app.py:1166
+msgid "Gentag"
+msgstr "Rétablir"
+
+#: app/main_app.py:1171
+msgid "Kodeord"
+msgstr "Mot de passe"
+
+#: app/main_app.py:1172
+#, python-format
+msgid "Kodeord (%d gemt)"
+msgstr "Mot de passe (%d enregistrés)"
+
+#: app/main_app.py:1177 app/main_app.py:2651
 msgid "Indstillinger"
 msgstr "Paramètres"
 
-#: app/main_app.py:469
-msgid "Mini"
-msgstr "Mini"
+#: app/main_app.py:1253
+msgid "Ingen filer. Træk PDF'er hertil eller klik Tilføj filer."
+msgstr "Aucun fichier. Glissez des PDF ici ou cliquez sur Ajouter des fichiers."
 
-#: app/main_app.py:470
-msgid "Filnavn"
-msgstr "Nom du fichier"
+#: app/main_app.py:1262
+#, python-format
+msgid "%(n)d filer · %(p)d sider"
+msgstr "%(n)d fichiers · %(p)d pages"
 
-#: app/main_app.py:471
-msgid "Sider"
-msgstr "Pages"
+#: app/main_app.py:1268
+#, python-format
+msgid "  ·  %(s)d valgt"
+msgstr "  ·  %(s)d sélectionné(s)"
 
-#: app/main_app.py:472
-msgid "Status"
-msgstr "Statut"
+#: app/main_app.py:1483
+msgid "Bekræft maskering"
+msgstr "Confirmer le caviardage"
 
-#: app/main_app.py:473
-msgid "Oprettelsesdato"
-msgstr "Date de création"
+#: app/main_app.py:1484
+#, python-format
+msgid ""
+"Dokumentet indeholder %s maskering(er), som fjerner indhold permanent i "
+"den gemte fil og ikke kan fortrydes i outputtet. Vil du fortsætte?"
+msgstr ""
+"Le document contient %s caviardage(s) qui suppriment définitivement du "
+"contenu dans le fichier enregistré et ne peuvent pas être annulés dans la"
+" sortie. Voulez-vous continuer ?"
 
-#: app/main_app.py:519
-msgid "Adgangskoder"
-msgstr "Mots de passe"
+#: app/main_app.py:1504 app/main_app.py:1583
+msgid "Eksport"
+msgstr "Exporter"
 
-#: app/main_app.py:522
-msgid "Bruges til at åbne krypterede PDF'er."
-msgstr "Utilisé pour ouvrir les PDF cryptés."
+#: app/main_app.py:1504
+msgid "Siden kan ikke eksporteres (låst fil)."
+msgstr "La page ne peut pas être exportée (fichier verrouillé)."
 
-#: app/main_app.py:534 app/main_app.py:1157
-msgid "Tjek kodeliste"
-msgstr "Vérifier la liste de mots de passe"
+#: app/main_app.py:1531
+msgid "Eksporterer…"
+msgstr "Exportation…"
 
-#: app/main_app.py:535 app/main_app.py:1288
-msgid "Gæt kodeord"
-msgstr "Deviner le mot de passe"
+#: app/main_app.py:1531
+#, python-format
+msgid "Eksporterer side til %s…"
+msgstr "Exportation de la page en %s…"
 
-#: app/main_app.py:537
-msgid "Forside"
-msgstr "Page de garde"
+#: app/main_app.py:1550 app/main_app.py:1566
+msgid "Siden kunne ikke behandles."
+msgstr "La page n'a pas pu être traitée."
 
-#: app/main_app.py:540
-msgid "Tilføj forside med overskrift"
-msgstr "Ajouter une page de garde avec un titre"
+#: app/main_app.py:1583
+#, python-format
+msgid ""
+"Siden er eksporteret til:\n"
+"%s"
+msgstr ""
+"La page a été exportée vers :\n"
+"%s"
 
-#: app/main_app.py:669
-msgid "Vis / rediger"
-msgstr "Afficher / modifier"
+#: app/main_app.py:1588
+msgid "Eksport fejlede"
+msgstr "Échec de l'exportation"
 
-#: app/main_app.py:671 app/preview_window.py:74
-msgid "Roter venstre"
-msgstr "Tourner à gauche"
-
-#: app/main_app.py:672 app/preview_window.py:75
-msgid "Roter højre"
-msgstr "Tourner à droite"
-
-#: app/main_app.py:675
-msgid "Slet side(er)"
-msgstr "Supprimer la ou les pages"
-
-#: app/main_app.py:759
+#: app/main_app.py:1614
 msgid "Understøttede filer"
 msgstr "Fichiers pris en charge"
 
-#: app/main_app.py:759 app/main_app.py:1087
-msgid "PDF-filer"
-msgstr "Fichiers PDF"
-
-#: app/main_app.py:760
+#: app/main_app.py:1615
 msgid "Billedfiler"
 msgstr "Fichiers image"
 
-#: app/main_app.py:958 app/main_app.py:964 app/main_app.py:970
-msgid "Split PDF"
-msgstr "Diviser le PDF"
+#: app/main_app.py:1661
+msgid "Slip for at tilføje filer"
+msgstr "Relâchez pour ajouter des fichiers"
 
-#: app/main_app.py:958
-msgid "Vælg venligst én PDF-fil for at splitte den."
-msgstr "Veuillez sélectionner un fichier PDF à diviser."
+#: app/main_app.py:1673
+msgid "Slip for at tilføje filerne"
+msgstr "Relâchez pour ajouter les fichiers"
 
-#: app/main_app.py:964
-msgid "Kun PDF-filer kan splittes."
-msgstr "Seuls les fichiers PDF peuvent être divisés."
-
-#: app/main_app.py:970
-msgid "Denne PDF har kun én side og kan ikke splittes."
-msgstr "Ce PDF ne contient qu'une seule page et ne peut pas être divisé."
-
-#: app/main_app.py:974
-msgid "Splitter PDF"
-msgstr "Division du PDF"
-
-#: app/main_app.py:974
-#, python-format
-msgid "Forbereder at splitte %s sider..."
-msgstr "Préparation de la division de %s pages..."
-
-#: app/main_app.py:981
-msgid "Kunne ikke åbne PDF'en (måske forkert adgangskode?)."
-msgstr "Impossible d'ouvrir le PDF (mot de passe incorrect ?)."
-
-#: app/main_app.py:1001
-msgid "Fejl ved split"
-msgstr "Erreur lors de la division"
-
-#: app/main_app.py:1001
-#, python-format
-msgid ""
-"Der opstod en fejl:\n"
-"%s"
-msgstr ""
-"Une erreur s'est produite :\n"
-"%s"
-
-#: app/main_app.py:1033 app/main_app.py:1082
+#: app/main_app.py:1974 app/main_app.py:2054 app/main_app.py:2065
+#: app/main_app.py:2068
 msgid "Gem"
 msgstr "Enregistrer"
 
-#: app/main_app.py:1033
+#: app/main_app.py:1974
 msgid "Ingen PDF-filer at gemme."
 msgstr "Aucun fichier PDF à enregistrer."
 
-#: app/main_app.py:1036
+#: app/main_app.py:1983
 msgid "Vælg mappe til at gemme filer"
 msgstr "Sélectionner un dossier pour enregistrer les fichiers"
 
-#: app/main_app.py:1043
-msgid "Gemmer PDF'er"
-msgstr "Enregistrement des PDFs"
+#: app/main_app.py:2013 app/main_app.py:2108
+msgid "Filen er i brug"
+msgstr "Fichier en cours d'utilisation"
 
-#: app/main_app.py:1043
+#: app/main_app.py:2014
+#, python-format
+msgid ""
+"Følgende fil(er) er åben i et andet program:\n"
+"\n"
+"%s\n"
+"\n"
+"Luk dem og prøv igen."
+msgstr ""
+"Le(s) fichier(s) suivant(s) sont ouverts dans un autre programme :\n"
+"\n"
+"%s\n"
+"\n"
+"Fermez-les et réessayez."
+
+#: app/main_app.py:2016
+msgid "Gemmer filer"
+msgstr "Enregistrement des fichiers"
+
+#: app/main_app.py:2016
 #, python-format
 msgid "Forbereder at gemme %s filer..."
 msgstr "Préparation de l'enregistrement de %s fichiers..."
 
-#: app/main_app.py:1082
-#, python-format
-msgid "%s PDF-filer gemt."
-msgstr "%s fichiers PDF enregistrés."
+#: app/main_app.py:2017
+msgid "Gemmer…"
+msgstr "Enregistrement…"
 
-#: app/main_app.py:1086
+#: app/main_app.py:2050
+#, python-format
+msgid "%(ok)d gemt · %(fail)d fejlede"
+msgstr "%(ok)d enregistrés · %(fail)d échoués"
+
+#: app/main_app.py:2055
+#, python-format
+msgid ""
+"%(ok)s filer gemt, %(fail)s fejlede.\n"
+"Se loggen for detaljer."
+msgstr ""
+"%(ok)s fichiers enregistrés, %(fail)s en échec.\n"
+"Consultez le journal pour les détails."
+
+#: app/main_app.py:2058
+#, python-format
+msgid "%(n)d filer gemt"
+msgstr "%(n)d fichiers enregistrés"
+
+#: app/main_app.py:2060
+#, python-format
+msgid "%s filer gemt."
+msgstr "%s fichiers enregistrés."
+
+#: app/main_app.py:2062 app/main_app.py:2156
+#, python-format
+msgid "%s side(r) uden tekstlag blev ikke udtrukket"
+msgstr "%s page(s) sans couche de texte n'ont pas été extraites"
+
+#: app/main_app.py:2064
+msgid "Filerne ligger i:"
+msgstr "Les fichiers se trouvent dans :"
+
+#: app/main_app.py:2088
 msgid "Ingen filer"
 msgstr "Aucun fichier"
 
-#: app/main_app.py:1086
+#: app/main_app.py:2088
 msgid "Tilføj filer først"
 msgstr "Ajoutez d'abord des fichiers"
 
-#: app/main_app.py:1090
+#: app/main_app.py:2109
+#, python-format
+msgid ""
+"Filen \"%s\" er åben i et andet program.\n"
+"Luk den og prøv igen."
+msgstr ""
+"Le fichier « %s » est ouvert dans un autre programme.\n"
+"Fermez-le et réessayez."
+
+#: app/main_app.py:2116
 msgid "Fletter PDF'er"
 msgstr "Fusion des PDF"
 
-#: app/main_app.py:1090
+#: app/main_app.py:2116
 #, python-format
 msgid "Forbereder at flette %s filer..."
 msgstr "Préparation de la fusion de %s fichiers..."
 
-#: app/main_app.py:1145
-msgid "Fletning fuldført"
-msgstr "Fusion terminée"
+#: app/main_app.py:2117
+msgid "Fletter…"
+msgstr "Fusion en cours…"
 
-#: app/main_app.py:1146
+#: app/main_app.py:2151
+#, python-format
+msgid "Gemt: %(name)s"
+msgstr "Enregistré : %(name)s"
+
+#: app/main_app.py:2153
 #, python-format
 msgid ""
-"PDF gemt som:\n"
-"%(path)s\n"
-"\n"
 "%(ok)s filer behandlet korrekt\n"
 "%(fail)s filer fejlede"
 msgstr ""
-"PDF enregistré sous :\n"
-"%(path)s\n"
-"\n"
 "%(ok)s fichiers traités correctement\n"
 "%(fail)s fichiers en échec"
 
-#: app/main_app.py:1152 app/main_app.py:1275 app/main_app.py:1454
-#: app/main_app.py:1456 app/main_app.py:1515 app/main_app.py:1595
-#: app/main_app.py:1641 app/main_app.py:1709
+#: app/main_app.py:2157
+msgid "Filen er gemt som:"
+msgstr "Le fichier a été enregistré sous :"
+
+#: app/main_app.py:2158
+msgid "Fletning fuldført"
+msgstr "Fusion terminée"
+
+#: app/main_app.py:2163
+msgid "Fletning fejlede"
+msgstr "Échec de la fusion"
+
+#: app/main_app.py:2164 app/main_app.py:2311 app/main_app.py:2733
+#: app/main_app.py:2868 app/main_app.py:2914 app/main_app.py:2971
 msgid "Fejl"
 msgstr "Erreur"
 
-#: app/main_app.py:1152
+#: app/main_app.py:2164
 #, python-format
 msgid ""
 "Kunne ikke gemme filen:\n"
@@ -311,268 +682,594 @@ msgstr ""
 "Impossible d'enregistrer le fichier :\n"
 "%s"
 
-#: app/main_app.py:1157 app/main_app.py:1288
-msgid "Der er ingen krypterede PDF-filer på listen."
-msgstr "Il n'y a pas de fichiers PDF chiffrés dans la liste."
-
-#: app/main_app.py:1161
-msgid "Tjekker kodeord fra liste"
-msgstr "Vérification des mots de passe de la liste"
-
-#: app/main_app.py:1184 app/main_app.py:1320
+#: app/main_app.py:2208
 msgid "Vent..."
 msgstr "Veuillez patienter..."
 
-#: app/main_app.py:1187 app/main_app.py:1324
+#: app/main_app.py:2211
 msgid "Stop"
 msgstr "Arrêter"
 
-#: app/main_app.py:1193 app/main_app.py:1331
-msgid "Luk"
-msgstr "Fermer"
+#: app/main_app.py:2220 app/main_app.py:2416
+msgid "Tjek kodeliste"
+msgstr "Vérifier la liste de mots de passe"
 
-#: app/main_app.py:1222 app/main_app.py:1401
+#: app/main_app.py:2220 app/main_app.py:2326
+msgid "Der er ingen krypterede PDF-filer på listen."
+msgstr "Il n'y a pas de fichiers PDF chiffrés dans la liste."
+
+#: app/main_app.py:2223
+msgid "Tjekker kodeord fra liste"
+msgstr "Vérification des mots de passe de la liste"
+
+#: app/main_app.py:2258 app/main_app.py:2639
 #, python-format
 msgid "Fundet: %s"
 msgstr "Trouvé : %s"
 
-#: app/main_app.py:1226 app/main_app.py:1405
+#: app/main_app.py:2262 app/main_app.py:2643
 msgid "Ikke fundet"
 msgstr "Non trouvé"
 
-#: app/main_app.py:1235
+#: app/main_app.py:2271
 msgid "Vælg metode"
 msgstr "Sélectionner la méthode"
 
-#: app/main_app.py:1246
+#: app/main_app.py:2282
 msgid "Vælg type af gætning:"
 msgstr "Sélectionner le type de devinette :"
 
-#: app/main_app.py:1254
+#: app/main_app.py:2290
 msgid "Numerisk (korte koder)"
 msgstr "Numérique (codes courts)"
 
-#: app/main_app.py:1260
+#: app/main_app.py:2296
 msgid "Antal cifre:"
 msgstr "Nombre de chiffres :"
 
-#: app/main_app.py:1275
+#: app/main_app.py:2311
 msgid "Vælg mindst én metode."
 msgstr "Sélectionnez au moins une méthode."
 
-#: app/main_app.py:1282
+#: app/main_app.py:2318
 msgid "Start"
 msgstr "Démarrer"
 
-#: app/main_app.py:1283 app/preview_window.py:86
-msgid "Annuller"
-msgstr "Annuler"
+#: app/main_app.py:2326 app/main_app.py:2418 app/main_app.py:2551
+msgid "Gæt kodeord"
+msgstr "Deviner le mot de passe"
 
-#: app/main_app.py:1293
+#: app/main_app.py:2330
 msgid "Gæt / Tjek kodeord"
 msgstr "Deviner / Vérifier le mot de passe"
 
-#: app/main_app.py:1386
+#: app/main_app.py:2385
+msgid "Adgangskoder"
+msgstr "Mots de passe"
+
+#: app/main_app.py:2390
+msgid "Bruges til at åbne krypterede PDF'er. Ét kodeord pr. linje."
+msgstr "Utilisé pour ouvrir les PDF chiffrés. Un mot de passe par ligne."
+
+#: app/main_app.py:2501
+msgid "Kodeord påkrævet"
+msgstr "Mot de passe requis"
+
+#: app/main_app.py:2506
+#, python-format
+msgid "Filen \"%s\" er beskyttet med kodeord."
+msgstr "Le fichier « %s » est protégé par mot de passe."
+
+#: app/main_app.py:2517
+msgid "Vis kodeord"
+msgstr "Afficher le mot de passe"
+
+#: app/main_app.py:2533
+msgid "Forkert kodeord. Prøv igen."
+msgstr "Mot de passe incorrect. Réessayez."
+
+#: app/main_app.py:2549 app/page_view.py:173
+msgid "Lås op"
+msgstr "Déverrouiller"
+
+#: app/main_app.py:2553
+msgid "Spring over"
+msgstr "Ignorer"
+
+#: app/main_app.py:2624
 #, python-format
 msgid "Numerisk (max %s)..."
 msgstr "Numérique (max %s)..."
 
-#: app/main_app.py:1434
+#: app/main_app.py:2695
 msgid "Kodeordsgætning"
 msgstr "Deviner le mot de passe"
 
-#: app/main_app.py:1437
-msgid "Maksimal længde på kodeord der skal gættes:"
-msgstr "Longueur maximale du mot de passe à deviner:"
+#: app/main_app.py:2698
+msgid "Maksimal længde at gætte:"
+msgstr "Longueur maximale à deviner :"
 
-#: app/main_app.py:1452
-msgid "Maksimal kodeordslængde er gemt."
-msgstr "Longueur maximale du mot de passe enregistrée."
+#: app/main_app.py:2700
+msgid "Antal cifre i numeriske koder brute-force forsøger."
+msgstr "Nombre de chiffres des codes numériques testés par force brute."
 
-#: app/main_app.py:1454
-msgid "Længden skal være mellem 1 og 10."
-msgstr "La longueur doit être comprise entre 1 et 10."
-
-#: app/main_app.py:1456
-msgid "Ugyldig værdi for længde."
-msgstr "Valeur de longueur invalide."
-
-#: app/main_app.py:1458
-msgid "Gem længde"
-msgstr "Enregistrer la longueur"
-
-#: app/main_app.py:1462
+#: app/main_app.py:2703
 msgid "Sprog"
 msgstr "Langue"
 
-#: app/main_app.py:1465
-msgid "Vælg sprog:"
-msgstr "Choisir la langue:"
+#: app/main_app.py:2709
+msgid "Sprog:"
+msgstr "Langue :"
 
-#: app/main_app.py:1488
-msgid "Sprog gemt"
-msgstr "Langue enregistrée"
+#: app/main_app.py:2710
+msgid "Sprogændringer træder i kraft, når du lukker vinduet."
+msgstr "Les changements de langue prennent effet à la fermeture de la fenêtre."
 
-#: app/main_app.py:1489
+#: app/main_app.py:2723
+msgid "Windows-integration"
+msgstr "Intégration Windows"
+
+#: app/main_app.py:2737
+msgid "Tilføj 'Flet med UniteDocs' til højreklik-menuen for PDF-filer"
+msgstr "Ajouter « Fusionner avec UniteDocs » au menu contextuel des fichiers PDF"
+
+#: app/main_app.py:2741
+msgid "Opdateringer"
+msgstr "Mises à jour"
+
+#: app/main_app.py:2753
+msgid "Søg automatisk efter opdateringer (én gang om ugen)"
+msgstr "Rechercher automatiquement les mises à jour (une fois par semaine)"
+
+#: app/main_app.py:2755
 msgid ""
-"Sprogindstillingen er gemt. Ændringerne vil blive anvendt, når du lukker "
-"dette vindue."
+"Unite Docs kontakter www.uniteapps.dk og spørger altid, før noget hentes "
+"eller installeres."
 msgstr ""
-"Paramètre de langue enregistré. Les modifications seront appliquées "
-"lorsque vous fermerez cette fenêtre."
+"Unite Docs contacte www.uniteapps.dk et demande toujours avant de "
+"télécharger ou d'installer quoi que ce soit."
 
-#: app/main_app.py:1493
-msgid "Gem sprog"
-msgstr "Enregistrer la langue"
+#: app/main_app.py:2757
+msgid "Manuel kontrol:"
+msgstr "Vérification manuelle :"
 
-#: app/main_app.py:1497 app/main_app.py:1711
-msgid "Cache"
-msgstr "Cache"
+#: app/main_app.py:2758
+msgid "Søg efter opdateringer"
+msgstr "Rechercher les mises à jour"
 
-#: app/main_app.py:1500
+#: app/main_app.py:2767
+#, python-format
+msgid "Nulstil oversprunget version (%s)"
+msgstr "Réinitialiser la version ignorée (%s)"
+
+#: app/main_app.py:2773
+msgid "Oversprunget version er nulstillet."
+msgstr "La version ignorée a été réinitialisée."
+
+#: app/main_app.py:2781
+msgid "Vedligeholdelse"
+msgstr "Maintenance"
+
+#: app/main_app.py:2782
+msgid "Gemte kodeord:"
+msgstr "Mots de passe enregistrés :"
+
+#: app/main_app.py:2783
 msgid "Slet gemte kodeord"
 msgstr "Supprimer les mots de passe enregistrés"
 
-#: app/main_app.py:1503
-msgid "Windows integration"
-msgstr "Intégration Windows"
-
-#: app/main_app.py:1520
-msgid "Tilføj 'Flet med UniteDocs' til højreklik-menu for PDF-filer"
-msgstr ""
-"Ajouter 'Fusionner avec UniteDocs' au menu clic droit pour les fichiers "
-"PDF"
-
-#: app/main_app.py:1526 app/main_app.py:1578
+#: app/main_app.py:2787 app/main_app.py:2851
 msgid "Log"
-msgstr ""
+msgstr "Journal"
 
-#: app/main_app.py:1531
+#: app/main_app.py:2788
 msgid "Logfilen kan hjælpe med fejlfinding."
-msgstr ""
+msgstr "Le fichier journal peut aider au dépannage."
 
-#: app/main_app.py:1547
+#: app/main_app.py:2796
 msgid "Download log"
-msgstr ""
+msgstr "Télécharger le journal"
 
-#: app/main_app.py:1549
+#: app/main_app.py:2799
 msgid "Send log via e-mail"
-msgstr ""
+msgstr "Envoyer le journal par e-mail"
 
-#: app/main_app.py:1578
+#: app/main_app.py:2851
 msgid "Der er ingen logfil endnu."
-msgstr ""
+msgstr "Il n'y a pas encore de fichier journal."
 
-#: app/main_app.py:1583
-#, fuzzy
+#: app/main_app.py:2856
 msgid "Gem logfil"
-msgstr "Enregistrer les fichiers individuels"
+msgstr "Enregistrer le fichier journal"
 
-#: app/main_app.py:1586
-#, fuzzy
+#: app/main_app.py:2859
 msgid "Logfiler"
-msgstr "Aucun fichier"
+msgstr "Fichiers journaux"
 
-#: app/main_app.py:1586
-#, fuzzy
+#: app/main_app.py:2859
 msgid "Alle filer"
-msgstr "Fichiers image"
+msgstr "Tous les fichiers"
 
-#: app/main_app.py:1595
-#, fuzzy, python-format
+#: app/main_app.py:2868
+#, python-format
 msgid "Kunne ikke gemme logfilen: %s"
-msgstr ""
-"Impossible d'enregistrer le fichier :\n"
-"%s"
+msgstr "Impossible d'enregistrer le fichier journal : %s"
 
-#: app/main_app.py:1614
-#, fuzzy
+#: app/main_app.py:2887
 msgid "(ingen logfil endnu)"
-msgstr "Aucun fichier"
+msgstr "(pas encore de fichier journal)"
 
-#: app/main_app.py:1627
+#: app/main_app.py:2900
 #, python-format
 msgid "UniteDocs log - version %s"
-msgstr ""
+msgstr "Journal UniteDocs - version %s"
 
-#: app/main_app.py:1629
+#: app/main_app.py:2902
 msgid "Beskriv venligst problemet her:"
-msgstr ""
+msgstr "Veuillez décrire le problème ici :"
 
-#: app/main_app.py:1631
+#: app/main_app.py:2904
 msgid "--- Seneste log ---"
-msgstr ""
+msgstr "--- Dernier journal ---"
 
-#: app/main_app.py:1641
-#, fuzzy, python-format
+#: app/main_app.py:2914
+#, python-format
 msgid "Kunne ikke åbne e-mailprogrammet: %s"
-msgstr "Impossible de charger l'icône : %s"
+msgstr "Impossible d'ouvrir le programme de messagerie : %s"
 
-#: app/main_app.py:1707
+#: app/main_app.py:2969
 msgid "Cache slettet"
 msgstr "Cache effacé"
 
-#: app/main_app.py:1707
+#: app/main_app.py:2969
 msgid "Alle gemte kodeord er slettet."
 msgstr "Tous les mots de passe enregistrés ont été supprimés."
 
-#: app/main_app.py:1709
+#: app/main_app.py:2971
 #, python-format
 msgid "Kunne ikke slette cache: %s"
 msgstr "Impossible de supprimer le cache : %s"
 
-#: app/main_app.py:1711
+#: app/main_app.py:2973
+msgid "Cache"
+msgstr "Cache"
+
+#: app/main_app.py:2973
 msgid "Ingen kodeordscache fundet."
 msgstr "Aucun cache de mot de passe trouvé."
 
-#: app/preview_window.py:22
-msgid "Vis fil"
-msgstr "Afficher le fichier"
+#: app/page_canvas.py:343 app/page_view.py:251
+msgid "Ingen sider at vise. Tilføj filer."
+msgstr "Aucune page à afficher. Ajoutez des fichiers."
 
-#: app/preview_window.py:72
-msgid "Zoom +"
-msgstr "Zoom +"
+#: app/page_canvas.py:722 app/page_canvas.py:821
+msgid "Skriv tekst:"
+msgstr "Saisir le texte :"
 
-#: app/preview_window.py:73
-msgid "Zoom -"
-msgstr "Zoom -"
+#: app/page_canvas.py:736
+msgid "Tekst kopieret"
+msgstr "Texte copié"
 
-#: app/preview_window.py:80
-msgid "Beskær"
-msgstr "Recadrer"
+#: app/page_canvas.py:774
+msgid "Kopiér"
+msgstr "Copier"
 
-#: app/preview_window.py:82
-msgid "Fjern beskæring"
-msgstr "Supprimer le recadrage"
+#: app/page_canvas.py:776
+msgid "Fremhæv markering"
+msgstr "Surligner la sélection"
 
-#: app/preview_window.py:85
-msgid "Ok"
-msgstr "Ok"
+#: app/page_canvas.py:778
+msgid "Understreg markering"
+msgstr "Souligner la sélection"
 
-#: app/preview_window.py:99
-msgid "Filen kunne ikke forhåndsvises"
-msgstr "Le fichier n'a pas pu être prévisualisé"
+#: app/page_canvas.py:780
+msgid "Gennemstreg markering"
+msgstr "Barrer la sélection"
 
-#: app/preview_window.py:99
-msgid "Måske en krypteret PDF"
-msgstr "Peut-être un PDF crypté"
+#: app/page_canvas.py:782
+msgid "Masker markering"
+msgstr "Caviarder la sélection"
 
-#~ msgid "Genstart påkrævet"
-#~ msgstr "Redémarrage requis"
+#: app/page_canvas.py:785
+#, python-format
+msgid "Masker alle forekomster af \"%s\""
+msgstr "Caviarder toutes les occurrences de « %s »"
+
+#: app/page_view.py:160
+msgid "Roter venstre"
+msgstr "Tourner à gauche"
+
+#: app/page_view.py:161
+msgid "Roter højre"
+msgstr "Tourner à droite"
+
+#: app/page_view.py:167
+msgid "Eksportér side"
+msgstr "Exporter la page"
+
+#: app/page_view.py:169
+msgid "Slet side"
+msgstr "Supprimer la page"
+
+#: app/page_view.py:175
+msgid "Vælg alle sider i filen"
+msgstr "Sélectionner toutes les pages du fichier"
+
+#: app/page_view.py:178
+msgid "Slet fil"
+msgstr "Supprimer le fichier"
+
+#: app/page_view.py:424
+#, python-format
+msgid "%(day)02d/%(month)02d-%(year)04d"
+msgstr "%(day)02d/%(month)02d/%(year)04d"
+
+#: app/page_view.py:596
+msgid "Låst"
+msgstr "Verrouillé"
+
+#: app/page_view.py:777
+#, python-format
+msgid "Fil valgt: %s"
+msgstr "Fichier sélectionné : %s"
+
+#: app/page_view.py:781
+#, python-format
+msgid "%(s)d sider valgt"
+msgstr "%(s)d pages sélectionnées"
+
+#: app/page_view.py:784 app/page_view.py:804
+#, python-format
+msgid "Side %(i)d af %(n)d"
+msgstr "Page %(i)d sur %(n)d"
+
+#: app/page_view.py:1140
+msgid "Slip for at gøre siden til sin egen fil"
+msgstr "Relâchez pour faire de la page un fichier distinct"
+
+#: app/page_view.py:1206
+#, python-format
+msgid "%(n)d sider"
+msgstr "%(n)d pages"
+
+#: app/page_view.py:1280
+msgid "Træk en ramme på siden for at beskære den"
+msgstr "Tracez un cadre sur la page pour la rogner"
+
+#: app/page_view.py:1325
+msgid "Zoom"
+msgstr "Zoom"
+
+#: app/page_view.py:1327
+msgid "Zoom ud"
+msgstr "Zoom arrière"
+
+#: app/page_view.py:1335
+msgid "Zoom ind"
+msgstr "Zoom avant"
+
+#: app/page_view.py:1341
+msgid "Vælg"
+msgstr "Sélectionner"
+
+#: app/page_view.py:1348
+msgid "Marker"
+msgstr "Sélectionner"
+
+#: app/page_view.py:1358 app/page_view.py:1415
+msgid "Vælg farve"
+msgstr "Choisir la couleur"
+
+#: app/page_view.py:1362
+msgid "Fremhæv"
+msgstr "Surligner"
+
+#: app/page_view.py:1369
+msgid "Masker"
+msgstr "Caviarder"
+
+#: app/page_view.py:1376
+#, fuzzy
+msgid "Søg og masker"
+msgstr "Caviarder"
+
+#: app/page_view.py:1478 app/page_view.py:1507
+msgid "Ingen forekomster"
+msgstr "Aucune occurrence"
+
+#: app/page_view.py:1481
+msgid "Søger…"
+msgstr "Recherche…"
+
+#: app/page_view.py:1512
+#, python-format
+msgid "%s forekomster markeret"
+msgstr "%s occurrences marquées"
+
+#~ msgid "Filfunktioner"
+#~ msgstr "Fonctions de fichier"
+
+#~ msgid "Roter fil"
+#~ msgstr "Faire pivoter le fichier"
+
+#~ msgid "Filrækkefølge"
+#~ msgstr "Ordre des fichiers"
+
+#~ msgid "Visning"
+#~ msgstr "Affichage"
+
+#~ msgid "Maksimal kodeordslængde er gemt."
+#~ msgstr "Longueur maximale du mot de passe enregistrée."
+
+#~ msgid "Længden skal være mellem 1 og 10."
+#~ msgstr "La longueur doit être comprise entre 1 et 10."
+
+#~ msgid "Ugyldig værdi for længde."
+#~ msgstr "Valeur de longueur invalide."
+
+#~ msgid "Gem længde"
+#~ msgstr "Enregistrer la longueur"
+
+#~ msgid "Vælg sprog:"
+#~ msgstr "Choisir la langue:"
+
+#~ msgid "Sprog gemt"
+#~ msgstr "Langue enregistrée"
+
+#~ msgid "Gem sprog"
+#~ msgstr "Enregistrer la langue"
+
+#~ msgid "Boks"
+#~ msgstr "Cadre"
+
+#~ msgid "Cirkel"
+#~ msgstr "Cercle"
+
+#~ msgid "Streg"
+#~ msgstr "Ligne"
+
+#~ msgid "Frihånd"
+#~ msgstr "Main levée"
+
+#~ msgid "Understreg"
+#~ msgstr "Souligner"
+
+#~ msgid "Gennemstreg"
+#~ msgstr "Barrer"
+
+#~ msgid "Masker boks"
+#~ msgstr "Caviarder cadre"
+
+#~ msgid "Masker ord"
+#~ msgstr "Caviarder mots"
+
+#~ msgid "Farve"
+#~ msgstr "Couleur"
+
+#~ msgid "Forside"
+#~ msgstr "Page de garde"
+
+#~ msgid "Forside: slået til"
+#~ msgstr "Page de garde : activée"
+
+#~ msgid "Forside: slået fra"
+#~ msgstr "Page de garde : désactivée"
+
+#~ msgid "Krypteret"
+#~ msgstr "Chiffré"
+
+#~ msgid "Dekrypteret"
+#~ msgstr "Déchiffré"
+
+#~ msgid "Ikke krypteret"
+#~ msgstr "Non chiffré"
+
+#~ msgid "Billede/Andet"
+#~ msgstr "Image/Autre"
+
+#~ msgid "Fejl/Ukendt"
+#~ msgstr "Erreur/Inconnu"
+
+#~ msgid "Ukendt"
+#~ msgstr "Inconnu"
+
+#~ msgid "Skal siden oprettes før eller efter \"%s\"?"
+#~ msgstr "La page doit-elle être créée avant ou après « %s » ?"
+
+#~ msgid "Split sider"
+#~ msgstr "Diviser les pages"
+
+#~ msgid "Omvendt"
+#~ msgstr "Inverser"
+
+#~ msgid "Filvisning"
+#~ msgstr "Vue des fichiers"
+
+#~ msgid "Sidevisning"
+#~ msgstr "Vue des pages"
+
+#~ msgid "Mini"
+#~ msgstr "Mini"
+
+#~ msgid "Filnavn"
+#~ msgstr "Nom du fichier"
+
+#~ msgid "Sider"
+#~ msgstr "Pages"
+
+#~ msgid "Status"
+#~ msgstr "Statut"
+
+#~ msgid "Oprettelsesdato"
+#~ msgstr "Date de création"
+
+#~ msgid "Vis / rediger"
+#~ msgstr "Afficher / modifier"
+
+#~ msgid "Slet side(er)"
+#~ msgstr "Supprimer la ou les pages"
+
+#~ msgid "Split PDF"
+#~ msgstr "Diviser le PDF"
+
+#~ msgid "Vælg venligst én PDF-fil for at splitte den."
+#~ msgstr "Veuillez sélectionner un fichier PDF à diviser."
+
+#~ msgid "Kun PDF-filer kan splittes."
+#~ msgstr "Seuls les fichiers PDF peuvent être divisés."
+
+#~ msgid "Denne PDF har kun én side og kan ikke splittes."
+#~ msgstr "Ce PDF ne contient qu'une seule page et ne peut pas être divisé."
+
+#~ msgid "Splitter PDF"
+#~ msgstr "Division du PDF"
+
+#~ msgid "Forbereder at splitte %s sider..."
+#~ msgstr "Préparation de la division de %s pages..."
+
+#~ msgid "Splitter…"
+#~ msgstr "Division en cours…"
+
+#~ msgid "Kunne ikke åbne PDF'en (måske forkert adgangskode?)."
+#~ msgstr "Impossible d'ouvrir le PDF (mot de passe incorrect ?)."
+
+#~ msgid "Fejl ved split"
+#~ msgstr "Erreur lors de la division"
 
 #~ msgid ""
-#~ "Programmet skal genstartes for at "
-#~ "sprogændringerne kan træde i kraft. Vil"
-#~ " du genstarte nu?"
+#~ "Der opstod en fejl:\n"
+#~ "%s"
 #~ msgstr ""
-#~ "Le programme doit être redémarré pour"
-#~ " que les changements de langue "
-#~ "prennent effet. Voulez-vous redémarrer "
-#~ "maintenant?"
+#~ "Une erreur s'est produite :\n"
+#~ "%s"
 
-#~ msgid "Gem"
-#~ msgstr "Enregistrer"
+#~ msgid "Split fuldført: %(n)d sider"
+#~ msgstr "Division terminée : %(n)d pages"
 
-#~ msgid "Info: 'icon.ico' not found. Using default icon."
-#~ msgstr "Info: 'icon.ico' introuvable. Utilisation de l'icône par défaut."
+#~ msgid "Vis fil"
+#~ msgstr "Afficher le fichier"
+
+#~ msgid "Zoom +"
+#~ msgstr "Zoom +"
+
+#~ msgid "Zoom -"
+#~ msgstr "Zoom -"
+
+#~ msgid "Fjern beskæring"
+#~ msgstr "Supprimer le recadrage"
+
+#~ msgid "Ok"
+#~ msgstr "Ok"
+
+#~ msgid "Filen kunne ikke forhåndsvises"
+#~ msgstr "Le fichier n'a pas pu être prévisualisé"
+
+#~ msgid "Måske en krypteret PDF"
+#~ msgstr "Peut-être un PDF crypté"
+
+#~ msgid "Hele filen"
+#~ msgstr "Tout le fichier"
+
+#~ msgid "Masker søgning"
+#~ msgstr "Caviarder recherche"
 

@@ -1,7 +1,27 @@
 # RUNTIME DEPENDENCIES (Required for running the application)
-# Core PDF Processing
-pikepdf==10.5.1
-pypdfium2==5.7.1
+# Core PDF engine — PyMuPDF (fitz) is now the single PDF engine (merge, split,
+# rotate, render, decrypt, image->A4, error pages, title page). AGPL-3.0.
+PyMuPDF==1.28.2
+
+# Layout-aware Markdown extraction (used for .md/.epub/.txt export). AGPL-3.0.
+# Pinned to 0.3.4 on purpose: 1.27+ hard-requires pymupdf_layout + onnxruntime
+# + numpy (~150 MB), and its RapidOCR adds opencv (~100 MB) on top. OCR is done
+# instead via MuPDF's built-in Tesseract (see app/export_formats.py) using only
+# the tessdata language files in client/tessdata (~6 MB).
+pymupdf4llm==0.3.4
+
+# ePub writing. AGPL-3.0. Pulls lxml + six.
+EbookLib==0.20
+
+# Markdown -> XHTML for the ePub writer. BSD.
+Markdown==3.10.3
+
+# Transitiv via pymupdf4llm (tabel-formatering).
+tabulate==0.10.0
+
+# Transitive via EbookLib — pinned explicitly for reproducible builds.
+lxml==6.0.2
+six==1.17.0
 
 # Cryptographic primitives for fast password verification (AES/RC4).
 # BSD-licensed. Revisions 2-4 fall back to a pure-Python RC4 if absent;
@@ -12,11 +32,10 @@ pycryptodome==3.23.0
 Pillow==12.2.0
 
 # UI and Theming
-ttkthemes==3.2.2
+# sv-ttk (Sun Valley) er nu den eneste tema-motor — Windows 11-chrome (MIT).
+# ttkthemes/ThemedTk blev fjernet i GUI-redesignet.
+sv-ttk==2.6.1
 tkinterdnd2==0.4.3
-
-# Document Generation (for reports/export)
-reportlab==4.4.10
 
 # DEVELOPMENT DEPENDENCIES (Only required for building/development)
 # Internationalization tools (for updating/compiling translations)

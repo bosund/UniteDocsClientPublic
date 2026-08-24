@@ -39,6 +39,15 @@ class AppConfig:
     def getint(self, section, option, fallback=None):
         return self.config.getint(section, option, fallback=fallback)
 
+    def getboolean(self, section, option, fallback=None):
+        # Tolerant over for baade "1"/"0" og "true"/"false" (configparser
+        # accepterer begge). En vaerdi vi ikke kan tyde falder tilbage paa
+        # ``fallback`` i stedet for at vaelte opstarten.
+        try:
+            return self.config.getboolean(section, option, fallback=fallback)
+        except ValueError:
+            return fallback
+
     def set(self, section, option, value):
         if not self.config.has_section(section):
             self.config.add_section(section)

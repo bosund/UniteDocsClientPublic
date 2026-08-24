@@ -4,7 +4,7 @@
 
 ### The free, private, offline PDF merger & manager for Windows
 
-**Merge, split, rotate, crop and unlock PDFs — even password‑protected ones — without ever uploading a single file to the cloud.**
+**Merge, reorder, rotate, crop and unlock PDFs — even password‑protected ones — without ever uploading a single file to the cloud.**
 
 [![Platform](https://img.shields.io/badge/platform-Windows%2010%20%7C%2011-0078D6?logo=windows&logoColor=white)](https://github.com/bosund/UniteDocsClientPublic)
 [![Version](https://img.shields.io/badge/version-7.7.2-brightgreen)](CHANGELOG.md)
@@ -31,7 +31,7 @@
 
 Most free PDF tools force you to upload confidential documents to a website, choke the moment a file is password‑protected, or refuse to mix PDFs and images in one go. **Unite Docs solves all three.**
 
-It's a fast, lightweight **Windows desktop app** that does everything locally on your machine — no accounts, no subscriptions, no watermarks on your work, no data leaving your computer. Combine hundreds of documents, split a giant report into single pages, or decrypt a stack of PDFs each protected by a *different* password — all from one clean, native interface.
+It's a fast, lightweight **Windows desktop app** that does everything locally on your machine — no accounts, no subscriptions, no watermarks on your work, no data leaving your computer. Combine hundreds of documents, drag single pages out of a giant report, or decrypt a stack of PDFs each protected by a *different* password — all from one clean, native interface.
 
 > 💼 Built for lawyers, HR professionals, accountants, administrators, students and anyone who lives in a folder full of PDFs.
 
@@ -48,7 +48,7 @@ Unlike iLovePDF, Smallpdf, Adobe online and dozens of "free PDF combiner" websit
 | | Feature | What it does |
 |---|---|---|
 | 📑 | **Merge PDFs & images** | Combine unlimited PDF files *and* images (JPG/PNG) into one document, in any order you choose. |
-| ✂️ | **Split PDFs** | Break a large PDF into individual pages or smaller files in one click. |
+| ✂️ | **Reorder & extract pages** | Drag pages between files, or drag one out to become its own file. Crop any page non‑destructively. |
 | 🔐 | **Multi‑password merging** | Merge several encrypted PDFs that each use a **different** password in a single operation — something even most paid tools can't do. |
 | 🤖 | **Smart password guesser** | Forgot a short numeric PIN on a PDF? The built‑in brute‑force engine (RC4, AES‑128 & AES‑256) recovers short numeric passwords for you, fast and multi‑core. |
 | 🔄 | **Rotate & crop** | Rotate pages left/right and crop them visually, page by page. |
@@ -75,7 +75,7 @@ Unite Docs speaks your language — fully translated into **8 languages**:
 
 **A clean, native Windows interface — add files, reorder, merge and save in seconds.**
 
-![Unite Docs main window — merge, split, rotate and manage PDF files on Windows](assets/screenshot-main.jpg)
+![Unite Docs main window — merge, reorder, rotate and manage PDF files on Windows](assets/screenshot-main.jpg)
 
 **Preview, zoom and rotate any page before you save — including password‑protected PDFs.**
 
@@ -154,7 +154,7 @@ Python · Tkinter/ttk · [pikepdf](https://github.com/pikepdf/pikepdf) · [pypdf
 
 ## 🔎 Keywords
 
-*Free PDF merger for Windows · combine PDF files offline · merge PDF and images · split PDF · rotate PDF · crop PDF pages · decrypt password‑protected PDF · unlock PDF · merge encrypted PDFs with different passwords · PDF password recovery · PDF password remover · offline PDF editor · private PDF tool (no upload) · lightweight PDF app · open‑source PDF manager · Windows PDF combiner · batch merge PDFs · PDF thumbnails preview · alternative to iLovePDF / Smallpdf / Adobe Acrobat · PDF join tool · gratis PDF‑fletning · flet PDF · opdel PDF · lås PDF op · dansk PDF‑program.*
+*Free PDF merger for Windows · combine PDF files offline · merge PDF and images · reorder PDF pages · extract PDF pages · rotate PDF · crop PDF pages · decrypt password‑protected PDF · unlock PDF · merge encrypted PDFs with different passwords · PDF password recovery · PDF password remover · offline PDF editor · private PDF tool (no upload) · lightweight PDF app · open‑source PDF manager · Windows PDF combiner · batch merge PDFs · PDF thumbnails preview · alternative to iLovePDF / Smallpdf / Adobe Acrobat · PDF join tool · gratis PDF‑fletning · flet PDF · flyt PDF-sider · lås PDF op · dansk PDF‑program.*
 
 ---
 

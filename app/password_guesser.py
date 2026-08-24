@@ -3,7 +3,7 @@ import multiprocessing
 import time
 import threading
 from pathlib import Path
-import pypdfium2 as pdfium
+import pymupdf
 
 from . import pdf_crypto
 from .logging_config import get_logger
@@ -51,8 +51,12 @@ def _worker_task(args) -> str | None:
     for i in range(start, end):
         attempt = str(i).zfill(length)
         try:
-            pdfium.PdfDocument(_worker_pdf_data, password=attempt)
-            return attempt
+            d = pymupdf.open(stream=_worker_pdf_data, filetype="pdf")
+            try:
+                if not d.needs_pass or d.authenticate(attempt):
+                    return attempt
+            finally:
+                d.close()
         except Exception:
             pass
     return None
@@ -114,13 +118,18 @@ def _bruteforce_numeric(pdf_path: str, max_len: int = 4, chunk_size: int = 50000
     if ui_stop_flag and ui_stop_flag.is_set():
         return None
 
-    # Hurtigt tjek om den er åben uden password. pdfium er ikke trådsikkert, og
-    # dette kald kan overlappe med thumbnail-rendering, så del samme lås.
+    # Hurtigt tjek om den er åben uden password. Motoren er ikke garanteret
+    # trådsikker, og dette kald kan overlappe med thumbnail-rendering, så del
+    # samme lås.
     try:
-        from .pdf_renderer import PDFIUM_LOCK
-        with PDFIUM_LOCK:
-            pdfium.PdfDocument(pdf_path, password="")
-        return ""
+        from .pdf_renderer import PDF_LOCK
+        with PDF_LOCK:
+            d = pymupdf.open(pdf_path)
+            try:
+                if not d.needs_pass or d.authenticate(""):
+                    return ""
+            finally:
+                d.close()
     except Exception:
         pass
 

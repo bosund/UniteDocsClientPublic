@@ -1,17 +1,31 @@
 
 
+import os
+# pymupdf4llm/pymupdf skriver ellers en engangs-anbefaling ("Consider using the
+# pymupdf_layout package") til stdout. I den byggede exe uden konsol er stdout
+# None, og et print() ville crashe. Slå anbefalingen fra før motoren importeres.
+os.environ.setdefault("PYMUPDF_SUGGEST_LAYOUT_ANALYZER", "0")
 
-import pikepdf
-from pikepdf import Pdf, PasswordError, PdfError
+import pymupdf
 import io
 from pathlib import Path
 import datetime
-import os
 import re
-from .utils import create_error_pdf
 from .logging_config import get_logger
 
 logger = get_logger(__name__)
+
+# MuPDF's C-lag skriver advarsler direkte til stderr. I den byggede exe
+# (--windows-console-mode=disable) findes stderr ikke, og skrivningerne er i
+# bedste fald spild. Sluk dem her, ét sted, ved import af motoren.
+try:
+    pymupdf.TOOLS.mupdf_display_errors(False)
+except Exception:  # pragma: no cover - defensivt mod API-ændringer
+    pass
+
+# A4 i PDF-punkter. PyMuPDF's new_page() bruger samme mål som default, men
+# geometriberegningerne nedenfor har brug for tallene eksplicit.
+A4_SIZE = (595.0, 842.0)
 
 # Pre-compiled regex for PDF creation date parsing (performance: avoids recompilation on every call)
 _CREATION_DATE_RE = re.compile(r"D:(\d{4})(\d{2})(\d{2})")
@@ -19,7 +33,8 @@ _CREATION_DATE_RE = re.compile(r"D:(\d{4})(\d{2})(\d{2})")
 # Stable internal encryption-status keys. These are used as logic keys throughout
 # the app (filtering in _save_dec/_start_check_only/_run_guessing_process) and must
 # NOT be translated. The UI translates them to a localized label only at display time
-# (see MainApp._enc_status_label). Do not compare against localized strings.
+# (the page view shows a padlock icon instead). Never compare against
+# localized strings.
 ENC_ENCRYPTED = "ENCRYPTED"
 ENC_DECRYPTED = "DECRYPTED"
 ENC_NOT_ENCRYPTED = "NOT_ENCRYPTED"
@@ -27,34 +42,62 @@ ENC_IMAGE = "IMAGE"
 ENC_ERROR = "ERROR"
 ENC_UNKNOWN = "UNKNOWN"
 
-def open_with_passwords(path: str, passwords: list[str]) -> Pdf | None:
+# Fejltyper fra PyMuPDF der betyder "filen kan ikke læses som PDF".
+_OPEN_ERRORS = (
+    pymupdf.FileDataError,
+    pymupdf.EmptyFileError,
+    FileNotFoundError,
+    PermissionError,
+    ValueError,
+)
+
+
+def open_with_passwords(path: str, passwords: list[str]) -> "pymupdf.Document | None":
+    """Åbn en PDF, om nødvendigt ved at prøve brugerens adgangskoder.
+
+    Returnerer et ÅBENT Document — kalderen har ansvaret for at lukke det
+    (brug try/finally). Returnerer None hvis filen ikke kan åbnes eller ingen
+    adgangskode passer.
+    """
+    doc = None
     try:
-        return pikepdf.open(path)
-    except PasswordError:
+        doc = pymupdf.open(path)
+        if not doc.needs_pass:
+            return doc
         for pw in passwords:
-            try:
-                return pikepdf.open(path, password=pw)
-            except PasswordError:
-                continue
-    except (PdfError, FileNotFoundError, PermissionError) as e:
+            if doc.authenticate(pw):
+                return doc
+        logger.info("Ingen af adgangskoderne passede til %s", Path(path).name)
+    except _OPEN_ERRORS as e:
         logger.info("Kunne ikke åbne filen %s: %s", Path(path).name, e)
     except Exception as e:
         logger.error("Unexpected error opening %s: %s", path, e)
+    _safe_close(doc)
     return None
 
-def _image_to_pdf_a4(image_path: str, rotation: int = 0, crop_box: tuple[int, int, int, int] | None = None) -> io.BytesIO | None:
+
+def _safe_close(doc) -> None:
+    if doc is not None:
+        try:
+            doc.close()
+        except Exception:
+            pass
+
+
+def _image_to_pdf_a4(image_path: str, rotation: int = 0, crop_box: "tuple[int, int, int, int] | None" = None) -> "io.BytesIO | None":
+    """Læg et billede centreret på en A4-side og returnér siden som PDF i en BytesIO."""
     try:
         from PIL import Image
-        from reportlab.pdfgen import canvas
-        from reportlab.lib.pagesizes import A4
-        from reportlab.lib.utils import ImageReader
 
         img = Image.open(image_path)
         if crop_box:
             img = img.crop(crop_box)
         if rotation != 0:
             img = img.rotate(-rotation, expand=True)
-        page_w, page_h = A4
+        if img.mode not in ("RGB", "L"):
+            img = img.convert("RGB")
+
+        page_w, page_h = A4_SIZE
         img_w, img_h = img.size
         aspect = img_h / float(img_w)
         new_w = page_w - 20
@@ -63,11 +106,19 @@ def _image_to_pdf_a4(image_path: str, rotation: int = 0, crop_box: tuple[int, in
             new_h = page_h - 20
             new_w = new_h / aspect
         x_centered, y_centered = (page_w - new_w) / 2, (page_h - new_h) / 2
+
+        img_buffer = io.BytesIO()
+        img.save(img_buffer, format="PNG")
+
         pdf_buffer = io.BytesIO()
-        c = canvas.Canvas(pdf_buffer, pagesize=A4)
-        c.drawImage(ImageReader(img), x_centered, y_centered, width=new_w, height=new_h, preserveAspectRatio=True, anchor='c')
-        c.showPage()
-        c.save()
+        doc = pymupdf.open()
+        try:
+            page = doc.new_page(width=page_w, height=page_h)
+            rect = pymupdf.Rect(x_centered, y_centered, x_centered + new_w, y_centered + new_h)
+            page.insert_image(rect, stream=img_buffer.getvalue())
+            doc.save(pdf_buffer, garbage=3, deflate=True)
+        finally:
+            doc.close()
         pdf_buffer.seek(0)
         return pdf_buffer
     except (ImportError, FileNotFoundError, PermissionError, OSError) as e:
@@ -77,112 +128,134 @@ def _image_to_pdf_a4(image_path: str, rotation: int = 0, crop_box: tuple[int, in
         logger.error("Uventet fejl ved billede %s: %s", image_path, e)
         return None
 
+
 def get_page_count(path: str, passwords: list[str]) -> str:
     if Path(path).suffix.lower() != '.pdf':
         return ""
+    doc = None
     try:
-        pdf = open_with_passwords(path, passwords)
-        return str(len(pdf.pages)) if pdf else ""
-    except (PdfError, FileNotFoundError, PermissionError):
-        return ""
+        doc = open_with_passwords(path, passwords)
+        return str(doc.page_count) if doc else ""
     except Exception:
         return ""
+    finally:
+        _safe_close(doc)
+
 
 def enc_status(path: str, passwords: list[str]) -> str:
     """Return a stable internal encryption-status key (ENC_* constant), never a
     localized string. The UI translates the key for display only."""
     if Path(path).suffix.lower() != '.pdf':
         return ENC_IMAGE
+    doc = None
     try:
-        pikepdf.open(path)
-        return ENC_NOT_ENCRYPTED
-    except PasswordError:
+        doc = pymupdf.open(path)
+        if not doc.needs_pass:
+            return ENC_NOT_ENCRYPTED
         for pw in passwords:
-            try:
-                pikepdf.open(path, password=pw)
+            if doc.authenticate(pw):
                 return ENC_DECRYPTED
-            except PasswordError:
-                continue
         return ENC_ENCRYPTED
-    except (PdfError, FileNotFoundError, PermissionError):
+    except _OPEN_ERRORS:
         return ENC_ERROR
     except Exception:
         return ENC_UNKNOWN
+    finally:
+        _safe_close(doc)
+
+
+def _creation_date_from_doc(doc) -> str:
+    """Træk YYYY-MM-DD ud af dokumentets metadata, eller "" hvis den mangler."""
+    meta = doc.metadata or {}
+    for key in ("creationDate", "modDate"):
+        if (val := meta.get(key)):
+            if (m := _CREATION_DATE_RE.match(str(val))):
+                return f"{m[1]}-{m[2]}-{m[3]}"
+    return ""
+
+
+def _file_size(path: str) -> int:
+    """Filstoerrelse i bytes, 0 hvis den ikke kan laeses. Bruges kun til sortering."""
+    try:
+        return os.path.getsize(path)
+    except (OSError, FileNotFoundError):
+        return 0
+
+
+def _mtime_date(path: str) -> str:
+    try:
+        return datetime.datetime.fromtimestamp(os.path.getmtime(path)).strftime("%Y-%m-%d")
+    except (OSError, FileNotFoundError):
+        return ""
+
 
 def get_creation_date(path: str, passwords: list[str]) -> str:
     if Path(path).suffix.lower() != '.pdf':
-        try:
-            return datetime.datetime.fromtimestamp(os.path.getmtime(path)).strftime("%Y-%m-%d")
-        except (OSError, FileNotFoundError):
-            return ""
+        return _mtime_date(path)
+    doc = None
     try:
-        pdf = open_with_passwords(path, passwords)
-        if pdf:
-            for key in ("/CreationDate", "CreationDate", "/ModDate", "ModDate"):
-                if (val := pdf.docinfo.get(key)):
-                    if (m := _CREATION_DATE_RE.match(str(val))):
-                        return f"{m[1]}-{m[2]}-{m[3]}"
-        return datetime.datetime.fromtimestamp(os.path.getmtime(path)).strftime("%Y-%m-%d")
-    except (PdfError, FileNotFoundError, PermissionError):
-        return ""
+        doc = open_with_passwords(path, passwords)
+        if doc and (found := _creation_date_from_doc(doc)):
+            return found
+        return _mtime_date(path)
     except Exception:
         return ""
+    finally:
+        _safe_close(doc)
+
 
 def get_pdf_metadata(path: str, passwords: list[str]) -> dict:
     """Batch metadata fetch: opens the PDF once and returns page_count, enc_status and creation_date.
 
     Performance: replaces three separate calls to get_page_count(), enc_status() and
     get_creation_date() in _refresh_all() — reducing PDF open operations from 3N to N.
-    Returns a dict with keys 'page_count' (str), 'enc_status' (str), 'creation_date' (str).
+    Returns a dict with keys 'page_count' (str), 'enc_status' (str), 'creation_date' (str)
+    and 'size_bytes' (int).
     """
     suffix = Path(path).suffix.lower()
+    size = _file_size(path)
     if suffix != '.pdf':
-        try:
-            mtime = datetime.datetime.fromtimestamp(os.path.getmtime(path)).strftime("%Y-%m-%d")
-        except (OSError, FileNotFoundError):
-            mtime = ""
-        return {"page_count": "", "enc_status": ENC_IMAGE, "creation_date": mtime}
+        return {"page_count": "", "enc_status": ENC_IMAGE,
+                "creation_date": _mtime_date(path), "size_bytes": size}
 
     page_count = ""
     enc = ENC_ERROR
     creation_date = ""
+    doc = None
 
     try:
-        # Try opening without password first
         try:
-            pdf = pikepdf.open(path)
-            enc = ENC_NOT_ENCRYPTED
-        except PasswordError:
-            pdf = None
-            enc = ENC_ENCRYPTED
-            for pw in passwords:
-                try:
-                    pdf = pikepdf.open(path, password=pw)
-                    enc = ENC_DECRYPTED
-                    break
-                except PasswordError:
-                    continue
-        except (PdfError, FileNotFoundError, PermissionError):
-            return {"page_count": "", "enc_status": ENC_ERROR, "creation_date": ""}
+            doc = pymupdf.open(path)
+        except _OPEN_ERRORS:
+            return {"page_count": "", "enc_status": ENC_ERROR,
+                    "creation_date": "", "size_bytes": size}
         except Exception:
-            return {"page_count": "", "enc_status": ENC_UNKNOWN, "creation_date": ""}
+            return {"page_count": "", "enc_status": ENC_UNKNOWN,
+                    "creation_date": "", "size_bytes": size}
 
-        if pdf is not None:
-            page_count = str(len(pdf.pages))
-            for key in ("/CreationDate", "CreationDate", "/ModDate", "ModDate"):
-                if (val := pdf.docinfo.get(key)):
-                    if (m := _CREATION_DATE_RE.match(str(val))):
-                        creation_date = f"{m[1]}-{m[2]}-{m[3]}"
-                        break
+        readable = True
+        if not doc.needs_pass:
+            enc = ENC_NOT_ENCRYPTED
+        else:
+            enc = ENC_ENCRYPTED
+            readable = False
+            for pw in passwords:
+                if doc.authenticate(pw):
+                    enc = ENC_DECRYPTED
+                    readable = True
+                    break
+
+        if readable:
+            page_count = str(doc.page_count)
+            creation_date = _creation_date_from_doc(doc)
 
         if not creation_date:
-            try:
-                creation_date = datetime.datetime.fromtimestamp(os.path.getmtime(path)).strftime("%Y-%m-%d")
-            except (OSError, FileNotFoundError):
-                creation_date = ""
+            creation_date = _mtime_date(path)
 
     except Exception as e:
         logger.error("Unexpected error in get_pdf_metadata for %s: %s", path, e)
+    finally:
+        _safe_close(doc)
 
-    return {"page_count": page_count, "enc_status": enc, "creation_date": creation_date}
-
+    return {"page_count": page_count, "enc_status": enc,
+            "creation_date": creation_date, "size_bytes": size}

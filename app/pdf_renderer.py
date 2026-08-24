@@ -1,108 +1,143 @@
-import io
+import os
 import threading
+from collections import OrderedDict
 from pathlib import Path
 from typing import Optional
 from PIL import Image
-import pikepdf
+import pymupdf
 
+from . import pdf_utils
+from . import theme
 from .logging_config import get_logger
 
 logger = get_logger(__name__)
 
-try:
-    import pypdfium2 as pdfium
-except ImportError:  # Fallback: user must install pypdfium2
-    pdfium = None
-
-# PDFium er IKKE trådsikkert: dets funktioner må ikke kaldes samtidigt fra flere
-# tråde — heller ikke på forskellige dokumenter (jf. pypdfium2-dokumentationen,
-# "Incompatibility with Threading"). Flere thumbnail-workers der renderede
-# samtidigt kunne derfor crashe processen med et native segfault (intet i
-# Python-loggen). Alle pdfium-kald i appen serialiseres gennem denne ene lås.
-PDFIUM_LOCK = threading.Lock()
+# MuPDF er ikke garanteret trådsikkert på tværs af dokumenter. Flere
+# thumbnail-workers der renderede samtidigt kunne crashe processen med et
+# native segfault (intet i Python-loggen). Alle motorkald i appen serialiseres
+# gennem denne ene lås — password_guesser importerer den samme.
+PDF_LOCK = threading.Lock()
 
 SUPPORTED_IMAGE_EXT = {'.jpg', '.jpeg', '.png', '.bmp', '.tiff', '.tif'}
+
+# Single source of truth for the file-view thumbnail size (was hardcoded 50×50 in
+# several places). The page view uses its own, larger tile size.
+THUMB_SIZE = (90, 90)
+
+
+class _OpenDocCache:
+    """Tiny LRU of *open* documents so rendering many pages of the same file (the
+    page view) does not re-open — and re-parse — the PDF on every single tile
+    (measured ~7 ms/open on a 375-page file → the dominant cost when tiles are
+    small). ONLY touched while PDF_LOCK is held, so a single cached doc is never
+    used by two threads at once (MuPDF is not cross-thread safe)."""
+
+    def __init__(self, limit: int = 2):
+        self._items = OrderedDict()     # key -> open Document
+        self._limit = limit
+
+    def get_or_open(self, path: str, passwords):
+        key = (os.path.normcase(os.path.abspath(path)), tuple(passwords))
+        doc = self._items.get(key)
+        if doc is not None:
+            try:
+                _ = doc.page_count          # liveness probe
+                self._items.move_to_end(key)
+                return doc
+            except Exception:
+                self._items.pop(key, None)
+        doc = pdf_utils.open_with_passwords(path, passwords)
+        if doc is not None:
+            self._items[key] = doc
+            self._items.move_to_end(key)
+            while len(self._items) > self._limit:
+                _, old = self._items.popitem(last=False)
+                try:
+                    old.close()
+                except Exception:
+                    pass
+        return doc
+
+    def clear(self):
+        for d in self._items.values():
+            try:
+                d.close()
+            except Exception:
+                pass
+        self._items.clear()
+
+
+# Guarded by PDF_LOCK (all render_page/render_pages access holds the lock).
+_doc_cache = _OpenDocCache()
+
+
+def clear_doc_cache():
+    """Close and drop all cached open documents. Call on shutdown, and whenever a
+    held file must be released. Acquires PDF_LOCK so it never races a render."""
+    with PDF_LOCK:
+        _doc_cache.clear()
 
 
 def _log(msg: str):
     logger.debug("%s", msg)
 
 
-def _render_with_pdfium_path(path: str, passwords: list[str], dpi: int) -> Optional[Image.Image]:
-    if not pdfium:
-        _log("pypdfium2 ikke installeret")
-        return None
-    first_err: Optional[Exception] = None
-    # Serialisér alle pdfium-kald (se PDFIUM_LOCK) — pdfium er ikke trådsikkert.
-    with PDFIUM_LOCK:
-        # Prøv med tom adgangskode først og derefter brugerens liste
-        for pw in ["", *passwords, None]:
-            doc = None
-            try:
-                if pw is None:
-                    doc = pdfium.PdfDocument(path)
-                else:
-                    doc = pdfium.PdfDocument(path, password=pw)
-                if len(doc) == 0:
-                    _log("PdfDocument har 0 sider")
-                    return None
-                page = doc[0]
-                pil_image = page.render(scale=dpi/72).to_pil()
-                return pil_image.convert('RGB')
-            except Exception as e:
-                # Gem første fejl til loggen: for en fil der slet ikke kan
-                # åbnes/renderes er fejlen typisk ens for alle password-forsøg.
-                if first_err is None:
-                    first_err = e
-                continue
-            finally:
-                if doc is not None:
-                    doc.close()
-    if first_err is not None:
-        _log(f"Ingen password virkede via pdfium ({type(first_err).__name__}: {first_err})")
+def _zoom_for(page, dpi=None, max_px=None, quality=1.3, cap_dpi=200, rect=None):
+    """Compute the render zoom factor for a page.
+
+    Rendering cost scales with the pixel count, so for a thumbnail we must NOT
+    render a full 150-dpi page and then throw 99% of it away. When ``max_px`` is
+    given, the zoom is chosen so the page's LONG side renders at ~``max_px*quality``
+    pixels (capped at ``cap_dpi``) — dramatically faster for large/complex pages.
+    Otherwise a fixed ``dpi`` (default 100) is used."""
+    if max_px:
+        # ``rect`` er beskaeringen naar siden er beskaaret: uden den ville en
+        # beskaaret side blive maalt paa hele siden og dermed renderet i en
+        # brøkdel af den oenskede pixelstoerrelse.
+        r = rect if rect is not None else page.rect
+        long_pt = max(r.width, r.height) or 1.0
+        eff_dpi = min(cap_dpi, max(8.0, max_px * quality * 72.0 / long_pt))
     else:
-        _log("Ingen password virkede via pdfium")
-    return None
+        eff_dpi = dpi if dpi else 100
+    return eff_dpi / 72.0
 
 
-def _extract_first_image_with_pikepdf(path: str, passwords: list) -> Optional[Image.Image]:
-    """Fallback: hent første indlejrede billede i side 1 (ofte brugbar for scannede PDF'er).
+def _clip_for(page, crop):
+    """``PageEdit.crop`` (uroterede kildeenheder, y-ned) -> ``get_pixmap(clip=)``.
 
-    'passwords' may be a pre-expanded list (e.g. ["", *original_passwords]) when called
-    from render_first_page() to avoid repeated list construction. Entries must be
-    str — pikepdf.open() rejects password=None with a TypeError.
+    Maalt empirisk: ``clip`` fortolkes i sidens VISNINGS-rum (efter /Rotate), saa
+    rektanglet skal gennem ``page.rotation_matrix``. Det raa rektangel giver
+    korrekte maal ved 0/180 men beskaerer det forkerte omraade ved 90/270.
+    Bemaerk at ``clip`` er relativt til ``page.rect`` og derfor IKKE skal have
+    cropbox-forskydningen med (i modsaetning til ``set_cropbox`` ved gem).
     """
-    for pw in passwords:
-        try:
-            with pikepdf.open(path, password=pw) as pdf:
-                if not pdf.pages:
-                    return None
-                page = pdf.pages[0]
-                resources = page.get('/Resources', {})
-                xobjects = resources.get('/XObject') if resources else None
-                if not xobjects:
-                    continue
-                for name, obj in xobjects.items():
-                    try:
-                        if getattr(obj, 'get', lambda k, d=None: None)('/Subtype') == '/Image':
-                            img_data = obj.read_bytes()
-                            # Forsøg at åbne direkte
-                            bio = io.BytesIO(img_data)
-                            try:
-                                return Image.open(bio)
-                            except Exception:
-                                # Hvis komprimeret: gem via pikepdf helper
-                                pass
-                    except Exception:
-                        continue
-        except pikepdf.PasswordError:
-            continue
-        except Exception:
+    if not crop:
+        return None
+    try:
+        r = (pymupdf.Rect(*crop) * page.rotation_matrix).normalize() & page.rect
+        if r.is_empty or not r.is_valid or r.width < 1 or r.height < 1:
             return None
-    return None
+        return r
+    except Exception as e:
+        _log(f"Kunne ikke omregne beskaering {crop}: {e}")
+        return None
 
 
-def render_first_page(path: str, passwords: list[str], dpi: int = 150) -> Optional[Image.Image]:
+def _pixmap_to_image(pix) -> Image.Image:
+    return Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
+
+
+def render_first_page(path: str, passwords: list[str], dpi: int = None,
+                      max_px: int = None) -> Optional[Image.Image]:
+    """Render side 1 af en PDF (eller åbn et billede) som et PIL-billede.
+
+    Angiv ``max_px`` for at rendere i cirka målstørrelse (hurtigt til thumbnails)
+    i stedet for en fast høj ``dpi``.
+
+    MuPDF rasteriserer også scannede sider direkte, så den tidligere
+    tredobbelte fallback-kæde (pdfium → pikepdf-resave → udtræk indlejret
+    billede) er ikke længere nødvendig.
+    """
     suffix = Path(path).suffix.lower()
     if suffix != '.pdf':
         if suffix in SUPPORTED_IMAGE_EXT:
@@ -113,59 +148,154 @@ def render_first_page(path: str, passwords: list[str], dpi: int = 150) -> Option
                 return None
         return None
 
-    # Performance: precompute expanded password list once for all fallback paths below.
-    # Tom streng først (= "intet password" for pikepdf) — ALDRIG None: pikepdf.open()
-    # kaster TypeError på password=None, og da det ikke er en PasswordError, ville
-    # den afbryde hele fallback-kæden før de rigtige passwords blev prøvet.
-    pikepdf_passwords: list[str] = list(dict.fromkeys(["", *passwords]))
-
-    # Først direkte pdfium
-    img = _render_with_pdfium_path(path, passwords, dpi)
-    if img:
-        return img
-
-    # Fallback: forsøg at åbne med pikepdf og gemme til buffer og så pdfium (nogle gange virker det)
-    if pdfium:
+    with PDF_LOCK:
+        doc = pdf_utils.open_with_passwords(path, passwords)
+        if not doc:
+            _log("Kunne ikke åbne PDF til rendering")
+            return None
         try:
-            for pw in pikepdf_passwords:
-                try:
-                    with pikepdf.open(path, password=pw) as pdf:
-                        bio = io.BytesIO()
-                        pdf.save(bio)
-                        bio.seek(0)
-                        # Serialisér pdfium-kaldene (ikke trådsikkert, se PDFIUM_LOCK).
-                        with PDFIUM_LOCK:
-                            doc = None
-                            try:
-                                doc = pdfium.PdfDocument(bio)
-                                if len(doc):
-                                    page = doc[0]
-                                    img2 = page.render(scale=dpi/72).to_pil().convert('RGB')
-                                    return img2
-                            except Exception:
-                                continue
-                            finally:
-                                if doc is not None:
-                                    doc.close()
-                except pikepdf.PasswordError:
-                    continue
+            if doc.page_count == 0:
+                _log("PDF har 0 sider")
+                return None
+            page = doc[0]
+            zoom = _zoom_for(page, dpi=dpi or 150, max_px=max_px)
+            pix = page.get_pixmap(matrix=pymupdf.Matrix(zoom, zoom), alpha=False)
+            return _pixmap_to_image(pix)
         except Exception as e:
-            _log(f"Fallback pikepdf->pdfium fejlede: {e}")
-
-    # Sidste fallback: forsøg at udtrække første billede (reuse precomputed list)
-    img = _extract_first_image_with_pikepdf(path, pikepdf_passwords)
-    if img:
-        return img
-
-    _log("Alle render-forsøg mislykkedes")
-    return None
+            _log(f"Rendering fejlede: {type(e).__name__}: {e}")
+            return None
+        finally:
+            doc.close()
 
 
-def render_thumbnail(path: str, passwords: list[str], size=(50, 50)) -> Optional[Image.Image]:
+def _apply_extra_rotation(img: Image.Image, rotation: int) -> Image.Image:
+    """Apply an extra viewing rotation (user delta) to an already-rasterised
+    image. PIL rotates counter-clockwise, so negate to rotate clockwise."""
+    if rotation % 360:
+        return img.rotate(-rotation, expand=True)
+    return img
+
+
+def render_page(path: str, passwords: list[str], page_index: int,
+                rotation: int = 0, dpi: int = None, max_px: int = None,
+                crop=None) -> Optional[Image.Image]:
+    """Render a single PDF page (or an image file's only page) as a PIL image.
+
+    Pass ``max_px`` to render at ~target size (fast for tiles/preview) instead of a
+    fixed ``dpi``. ``rotation`` is an extra user viewing delta applied after
+    rasterisation. One document open under PDF_LOCK. For rendering many pages of the
+    SAME file prefer :func:`render_pages` (opens once).
+
+    ``crop`` er ``PageEdit.crop``: (x0, y0, x1, y1) i uroterede kildeenheder med y
+    nedad. For PDF omregnes det til ``get_pixmap(clip=)``, som vil have rektanglet
+    i VISNINGS-rummet (efter /Rotate) -- maalt empirisk: ``rect * rotation_matrix``
+    giver de rigtige maal ved alle fire /Rotate-vaerdier, mens det raa rektangel
+    beskaerer det forkerte omraade ved 90/270. For billeder er enheden PIL-pixels."""
+    suffix = Path(path).suffix.lower()
+    if suffix != '.pdf':
+        if suffix in SUPPORTED_IMAGE_EXT:
+            try:
+                img = Image.open(path).convert("RGB")
+                if crop:
+                    # Billeder: beskaeringen er i PIL-pixels og skal ske FOER
+                    # nedskaleringen, ellers passer koordinaterne ikke.
+                    img = img.crop(tuple(int(round(v)) for v in crop))
+                if max_px:
+                    img.thumbnail((max_px, max_px), Image.Resampling.LANCZOS)
+                return _apply_extra_rotation(img, rotation)
+            except Exception as e:
+                _log(f"Kunne ikke åbne billede: {e}")
+                return None
+        return None
+
+    with PDF_LOCK:
+        # Cached open doc (reused across tiles of the same file); NOT closed here.
+        doc = _doc_cache.get_or_open(path, passwords)
+        if not doc:
+            return None
+        try:
+            if not (0 <= page_index < doc.page_count):
+                return None
+            page = doc[page_index]
+            clip = _clip_for(page, crop)
+            zoom = _zoom_for(page, dpi=dpi, max_px=max_px, rect=clip)
+            pix = page.get_pixmap(matrix=pymupdf.Matrix(zoom, zoom), clip=clip,
+                                  alpha=False)
+            return _apply_extra_rotation(_pixmap_to_image(pix), rotation)
+        except Exception as e:
+            _log(f"Side-rendering fejlede: {type(e).__name__}: {e}")
+            return None
+
+
+def page_words(path, passwords, page_index):
+    # Return page.get_text('words') (list of (x0,y0,x1,y1,word,...)) in UNROTATED
+    # source-page points (get_text is rotation-invariant). Cheap, no rasterisation;
+    # safe on the main thread. Returns [] on failure.
+    if Path(path).suffix.lower() != '.pdf':
+        return []
+    with PDF_LOCK:
+        doc = _doc_cache.get_or_open(path, passwords)
+        if not doc or not (0 <= page_index < doc.page_count):
+            return []
+        try:
+            return doc[page_index].get_text('words')
+        except Exception as e:
+            _log(f'page_words fejlede: {e}')
+            return []
+
+
+def page_geometry(path: str, passwords: list[str], page_index: int):
+    """Cheap read (no rasterisation) of a page's display geometry for the
+    annotation transform: ``(rotate_deg, disp_w, disp_h)`` where disp_* is
+    ``page.rect`` (display space, respecting /Rotate). Returns None on failure.
+    Uses the shared open-doc cache under PDF_LOCK. Safe to call on the main
+    thread — it opens/reads metadata only, never a pixmap (plan gotcha #13)."""
+    if Path(path).suffix.lower() != '.pdf':
+        return None
+    with PDF_LOCK:
+        doc = _doc_cache.get_or_open(path, passwords)
+        if not doc or not (0 <= page_index < doc.page_count):
+            return None
+        try:
+            page = doc[page_index]
+            r = page.rect
+            return int(page.rotation) % 360, float(r.width), float(r.height)
+        except Exception as e:
+            _log(f"page_geometry fejlede: {e}")
+            return None
+
+
+def render_pages(path: str, passwords: list[str], indices, dpi: int = None,
+                 max_px: int = None) -> dict:
+    """Batch-render several pages of ONE PDF, opening the document a single time
+    under PDF_LOCK. Returns ``{page_index: PIL.Image}`` (missing/failed pages are
+    omitted). Rotation is NOT applied here — apply the per-page delta at display.
+    Pass ``max_px`` for size-driven (fast) rendering."""
+    out = {}
+    if Path(path).suffix.lower() != '.pdf':
+        return out
+    with PDF_LOCK:
+        doc = _doc_cache.get_or_open(path, passwords)
+        if not doc:
+            return out
+        for idx in indices:
+            if not (0 <= idx < doc.page_count):
+                continue
+            try:
+                page = doc[idx]
+                zoom = _zoom_for(page, dpi=dpi, max_px=max_px)
+                pix = page.get_pixmap(matrix=pymupdf.Matrix(zoom, zoom), alpha=False)
+                out[idx] = _pixmap_to_image(pix)
+            except Exception as e:
+                _log(f"Batch-side {idx} fejlede: {e}")
+    return out
+
+
+def render_thumbnail(path: str, passwords: list[str], size=THUMB_SIZE) -> Optional[Image.Image]:
     img = render_first_page(path, passwords, dpi=72)
     if img is None:
         try:
-            img = Image.new('RGB', size, color='#f0f0f0')
+            img = Image.new('RGB', size, color=theme.C["tile_bg"])
         except Exception:
             return None
     try:

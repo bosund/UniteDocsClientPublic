@@ -6,6 +6,32 @@ import sys
 import multiprocessing
 from __version__ import __version__
 
+
+def _enable_dpi_awareness():
+    """Gør processen DPI-aware (kun Windows) FØR Tk oprettes.
+
+    Uden dette strækker Windows appen op med en sløret bitmap-skalering på skærme
+    over 100 %. Med DPI-awareness rapporterer Tk den rigtige DPI, og vores
+    vektorikoner (theme.scaling/px) tegnes skarpt i den faktiske opløsning.
+
+    Vi bruger *system*-DPI-awareness (1), ikke per-monitor: sv-ttk's chrome er
+    faste PNG-sprites uden skalering, så per-monitor ville kunne efterlade chromet
+    i én skalering og vores vektorikoner i en anden på samme skærm. shcore findes
+    fra Windows 8.1; user32-kaldet er en fallback for ældre versioner. Alt er
+    pakket i try/except — DPI må aldrig forhindre opstart.
+    """
+    if sys.platform != "win32":
+        return
+    import ctypes
+    try:
+        ctypes.windll.shcore.SetProcessDpiAwareness(1)  # PROCESS_SYSTEM_DPI_AWARE
+    except (AttributeError, OSError):
+        try:
+            ctypes.windll.user32.SetProcessDPIAware()   # Vista+ fallback
+        except (AttributeError, OSError):
+            pass
+
+
 def main():
     """
     Main function to control application startup, including the splash screen.
@@ -44,6 +70,9 @@ def main():
 
         # Vi er primær — registrer placeholder straks så sekundærer ved at vi starter
         ipc.register_starting()
+
+    # DPI-awareness SKAL sættes før det første Tk-vindue oprettes (splashen nedenfor).
+    _enable_dpi_awareness()
 
     # --- SPLASH SCREEN SETUP ---
     splash_root = tk.Tk()
