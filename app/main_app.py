@@ -1,223 +1,531 @@
-import tkinter as tk
-from tkinter import ttk, filedialog, messagebox
-from pathlib import Path
+"""Hovedvinduet.
+
+``MainWindow`` ejer kommandobaren, statuslinjen, sidevisningen og al
+orkestrering af baggrundsarbejde. Den er *ikke* sandhedskilde for dokumentet --
+det er ``edit_model.EditModel`` -- og den roerer aldrig PDF-motoren direkte;
+alt tungt arbejde ligger i ``save_pipeline``, ``export_formats``,
+``password_guesser`` og ``updater``, som alle er UI-frie og kan testes uden et
+vindue.
+
+To ting adskiller den fra 8.x' ``PDFTool(tk.Tk)``:
+
+* **Ingen ``after(50)``-pumpe.** Worker-traade leverer stadig gennem
+  ``self._queue.put((fn, args))``, men ``_queue`` er nu en
+  ``qt_util.MainThreadInvoker``, der sender et Qt-signal til UI-traaden. Et
+  resultat vises i det oejeblik det er klart i stedet for op til 50 ms senere.
+* **Dialogerne bor i ``dialogs.py``.** Hovedvinduet kalder dem; det bygger dem
+  ikke.
+
+Traadreglen fra 8.x staar uaendret: **en worker roerer aldrig en widget.** Alt
+Qt-afhaengigt snapshottes paa UI-traaden foer traaden startes (kodeordslister,
+job-lister, iid/sti-par), og resultater gaar tilbage gennem ``_queue``.
+"""
+
+from __future__ import annotations
+
 import os
-import sys
-import queue
 import subprocess
-import threading
-import uuid
-import datetime
+import sys
 import time
-from PIL import Image, ImageTk
+import uuid
+from pathlib import Path
+
 import pymupdf
-from . import pdf_renderer  # Rendering via PyMuPDF
-from . import export_formats
-from . import pdf_utils
-from . import utils
-from . import edit_model as em
-from . import save_pipeline
-from . import page_render
-from .page_view import PageView
-from .undo_stack import UndoStack, Command
-from . import annotations
-from . import password_guesser
-from .config import AppConfig
+from PySide6.QtCore import QSize, Qt, QTimer
+from PySide6.QtGui import QKeySequence, QShortcut
+from PySide6.QtWidgets import (QApplication, QFileDialog, QGridLayout,
+                               QHBoxLayout, QLabel, QMainWindow, QSizePolicy,
+                               QToolButton, QVBoxLayout, QWidget)
+
 from . import __version__
-from .localization import LocalizationManager
-from . import context_menu
-from . import updater
-from . import theme
+from . import annotations
+from . import anonymize
+from . import dialogs
+from . import edit_model as em
+from . import export_formats
 from . import icons_vector
-from .tooltip import Tooltip
+from . import page_render
+from . import password_guesser
+from . import pdf_renderer
+from . import pii
+from . import pdf_utils
+from . import pseudonymize
+from . import qt_util
+from . import save_pipeline
+from . import theme
+from . import updater
+from . import utils
+from .config import AppConfig
+from .localization import LocalizationManager
 from .logging_config import get_logger
+from .page_view import PageView
+from .qt_util import LinkLabel, muted_label
+from .tooltip import Tooltip
+from .undo_stack import Command, UndoStack
 
 logger = get_logger(__name__)
-import gettext
 
 # INTERNATIONALIZATION: Global translation function
 # AI ASSISTANTS: Always use _("text") for user-visible strings
-# Example: ttk.Label(parent, text=_("Save file"))
+# Example: QLabel(_("Save file"))
 # After adding new _("strings"), run: python update_locales.py
 _ = LocalizationManager.get_text
 
-try:
-    import tkinterdnd2 as _tkdnd_pkg
-    from tkinterdnd2 import DND_FILES as _DND_FILES
-    _tkdnd_support = True
-except ImportError:
-    _tkdnd_support = False
+_SUPPORTED_DROP_EXTENSIONS = {".pdf", ".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".tif"}
 
 
-class PDFTool(tk.Tk):
+class MainWindow(QMainWindow):
+
+    # Sorterings-panelets raekker: (noegle, label, har_retning)
+    _SORT_ROWS = (
+        (em.SORT_REVERSE, "Omvendt", False),
+        (em.SORT_DATE, "Oprettelsesdato", True),
+        (em.SORT_NAME, "Navn", True),
+        (em.SORT_SIZE, "Størrelse", True),
+    )
+
     def __init__(self, initial_files: list[str] | None = None):
+        super().__init__()
         self.config = AppConfig()
         self.language_code = self.config.get("General", "language", fallback="en")
-
-        # Initialize Localization Manager (Fix for Bug 1)
         LocalizationManager.initialize(self.language_code)
 
-        super().__init__()
+        self.setWindowTitle("Unite Docs – v%s" % __version__)
+        self._apply_default_geometry()
+        self.setMinimumSize(1000, 560)
+        self.setAcceptDrops(True)
 
-        if _tkdnd_support:
-            try:
-                _tkdnd_pkg.TkinterDnD._require(self)
-            except Exception as e:
-                logger.warning("tkdnd init failed: %s", e)
-
-        # Windows 11-chrome via sv-ttk (eneste tema-motor). Saettes EFTER
-        # super().__init__(), inden nogen widgets bygges.
-        self.style = theme.apply_theme(self)
-
-        self.protocol("WM_DELETE_WINDOW", self._on_closing)
-        self.bind_all("<Escape>", self._on_escape)
-        # Undo/redo. Guarded so Text widgets (kodeord / fritekst-felter) keep
-        # their own editing undo.
-        self.bind_all("<Control-z>", self._do_undo)
-        self.bind_all("<Control-Z>", self._do_undo)
-        self.bind_all("<Control-y>", self._do_redo)
-        self.bind_all("<Control-Shift-Z>", self._do_redo)
-        self.bind_all("<Control-Shift-z>", self._do_redo)
-        # Sætter ikonet på dette vindue og på alle Toplevel-vinduer der åbnes
-        # senere (dialoger, PreviewWindow, kodeordsvinduer) — se
-        # utils.install_window_icon for hvorfor default= alene ikke rækker.
-        utils.install_window_icon(self)
-
-        self.title(f"Unite Docs – v{__version__}")
-        # Bred nok til sidegitteret + fremviseren med hele annotationslinjen.
-        self.geometry("1200x820")
-        self.minsize(1000, 560)
-
-        # Internal state containers.
-        # EditModel is the single source of truth for the file list; the Treeview
-        # is a rendered view of it. `self.paths` is a read-only property derived
-        # from the model (see below) so external readers keep working. rotations/
-        # croppings stay real dicts in this phase (preview_window writes to them);
-        # they migrate to per-page state when the page view lands.
+        # --- Tilstand -----------------------------------------------------
+        # EditModel er eneste sandhed for fil-/side-raekkefoelge og redigering.
         self.model = em.EditModel()
+        self.undo_stack = UndoStack()
+        self.page_view: PageView | None = None
 
-        # Password list is now app state (the bottom "Adgangskoder" panel was
-        # replaced by an on-demand prompt + a command-bar dialog). This is the
-        # single source of truth for GUI-entered passwords; it survives a
-        # language rebuild because it is not a widget.
+        # Kodeordslisten er app-tilstand (ikke en widget), saa den overlever et
+        # sprogskift hvor hele fladen bygges om.
         self._pw_lines: list[str] = []
-        self._pw_dialog = None            # open password-manager dialog (if any)
-        # "Indsæt side": genererede sider skrives til en session-mappe under
-        # %APPDATA% og lever der indtil appen lukkes (modellen peger på dem).
-        self._insert_dialog = None
-        self._inserted_dir = None         # oprettes dovent ved første indsættelse
-        # On-open/on-add unlock prompting for encrypted files.
-        self._prompt_on_metadata: set[str] = set()   # iids to prompt once metadata lands
-        self._pending_unlock: list[str] = []          # queued iids awaiting a modal prompt
-        self._unlocking = False                        # re-entrancy guard for the queue
-        self._status_after = None                      # transient-status reset handle
-        # Performance: in-memory cache for the combined GUI + disk password list.
-        # Invalidated by _save_password_to_cache() whenever a new password is persisted.
         self._pw_cache: list[str] | None = None
+        self._pw_dialog: dialogs.PasswordsDialog | None = None
+        self._insert_dialog: dialogs.InsertPageDialog | None = None
+        self._inserted_dir: Path | None = None
+        self._prompt_on_metadata: set[str] = set()
+        self._pending_unlock: list[str] = []
+        self._unlocking = False
+        self._sort_panel: dialogs.SortPanel | None = None
+        self._sort_dir = {em.SORT_DATE: False, em.SORT_NAME: False, em.SORT_SIZE: False}
+        self._guess_dialog: dialogs.GuessProgressDialog | None = None
+        self._history_panel = None
+        self._export_progress: qt_util.ProgressDialog | None = None
+        self._update_busy = False
+        self._closing = False
 
-        # Efterladte "Indsæt side"-mapper fra en crashet kørsel ryddes her.
-        utils.purge_old_inserted_dirs()
-
-        # Background renderer for the page view (its own worker pool).
+        # --- Baggrundsarbejde --------------------------------------------
+        # ``put((fn, args))`` fra en hvilken som helst traad; leveres paa
+        # UI-traaden via et koeet Qt-signal (ingen polling).
+        self._queue = qt_util.MainThreadInvoker(self)
         self.page_render_mgr = page_render.PageRenderManager(self)
 
-        # Undo/redo (Fase 5). The stack mutates the model via inverse
-        # closures; the app resyncs its views after each undo/redo. Buttons
-        # subscribe for enable/disable.
-        self.undo_stack = UndoStack()
+        utils.purge_old_inserted_dirs()
 
-        self.page_view = None
+        # Anonymisering er en SESSION, ikke en engangskoersel: tilstanden
+        # her er dét der faar en fil tilfoejet BAGEFTER til at blive fanget.
+        self._anon_session = anonymize.AnonymizeSession()
+        self._anon_progress_at = 0.0
+        self._anon_asking = False
 
-        self._stop_guessing = False
-        # Sorterings-retning pr. noegle. "Omvendt" er tilstandsloes.
-        self._sort_dir = {em.SORT_DATE: False, em.SORT_NAME: False, em.SORT_SIZE: False}
-        self._sort_panel = None            # persistent Sorter-panel (Toplevel)
-        # Autoupdater: after()-id for opstartstjekket (annulleres ved sprogskift)
-        # og en vagt, så to tjek aldrig kører samtidig.
-        self._update_after_id = None
-        self._update_busy = False
-
-        # Build UI + async queue loop
-        self._load_icons()
+        self._themed_icons: list = []
         self._build_ui()
-        self._queue = queue.Queue()
-        self.after(50, self._process_queue)
-
+        self._install_shortcuts()
+        theme.on_scheme_changed(self._refresh_themed_icons)
         self.page_render_mgr.start()
-        self.after(30000, self._periodic_cleanup)
 
-        # --- Dynamic Resizing (Language Support) ---
-        # Adjust window width if translated buttons require more space
-        self.update_idletasks()
-        req_width = self.toolbar.winfo_reqwidth() + 60  # Add padding for safety
-        if req_width > 1200:
-            self.geometry(f"{req_width}x820")
-            self.minsize(req_width, 560)
+        self._cleanup_timer = QTimer(self)
+        self._cleanup_timer.timeout.connect(utils.purge_stale_temp_files)
+        self._cleanup_timer.start(30_000)
 
+        # Debounce af mange metadata-callbacks til én genopbygning.
+        self._pv_refresh_timer = QTimer(self)
+        self._pv_refresh_timer.setSingleShot(True)
+        self._pv_refresh_timer.timeout.connect(self._ensure_pages_then_rebuild)
+
+        # Forbigaaende statusbeskeder nulstilles af denne.
+        self._status_timer = QTimer(self)
+        self._status_timer.setSingleShot(True)
+        self._status_timer.timeout.connect(self._refresh_status)
+
+        self._restore_session()
+        QTimer.singleShot(0, self._first_paint)
         if initial_files:
-            self.after(300, lambda: self._add_paths(initial_files))
+            QTimer.singleShot(300, lambda: self._add_paths(list(initial_files)))
+        QTimer.singleShot(200, self._start_ipc)
+        # Opdateringstjekket skal ikke kappes om CPU'en med foerste optegning,
+        # IPC-starten eller indlaesningen af initial_files.
+        self._update_timer = QTimer(self)
+        self._update_timer.setSingleShot(True)
+        self._update_timer.timeout.connect(self.start_update_check)
+        self._update_timer.start(8000)
 
-        self.after(200, self._start_ipc)
+    # ------------------------------------------------------------------
+    # Opbygning af fladen
+    # ------------------------------------------------------------------
+    def _cmd_button(self, icon: str, text: str, slot, *, primary: bool = False,
+                    tip=None, shortcut: str | None = None,
+                    checkable: bool = False) -> QToolButton:
+        """Kommandobar-knap: stort ikon over forklarende tekst.
 
-        # Opdateringstjekket skal ikke kappes om CPU'en med første optegning,
-        # IPC-starten eller indlæsningen af initial_files. 8 sekunder er rigeligt.
-        self._update_after_id = self.after(8000, self._start_update_check)
+        Den synlige tekst ER labellen; en tooltip tilfoejes kun naar den baerer
+        EKSTRA information (genvej eller tilstand)."""
+        btn = QToolButton(self)
+        btn.setObjectName("CmdPrimary" if primary else "CmdButton")
+        btn.setText(text)
+        btn.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextUnderIcon)
+        size = theme.ICON["cmdlg"]
+        color = theme.C["selection_fg"] if primary else None
+        btn.setIcon(icons_vector.qicon(icon, size, color))
+        btn.setIconSize(QSize(size, size))
+        # Ikonet er tegnet i tekstfarven, saa det skal gentegnes ved temaskift.
+        self._themed_icons.append((btn, icon, size, primary))
+        btn.setCheckable(checkable)
+        btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn.clicked.connect(slot)
+        if tip is not None or shortcut is not None:
+            Tooltip.attach(btn, tip if tip is not None else text, shortcut=shortcut)
+        return btn
 
-    def _load_icons(self):
-        """Byg ikon-adgangen. Ikonerne tegnes i kode (``icons_vector``); den gamle
-        ``client/icons/*.png``-mappe er væk sammen med filvisningen.
+    def _icon_button(self, icon: str, tip: str, slot, *, shortcut=None) -> QToolButton:
+        """Kompakt ikon-kun-knap (pil-klyngen)."""
+        btn = QToolButton(self)
+        btn.setObjectName("ToolIcon")
+        size = theme.ICON["small"]
+        btn.setIcon(icons_vector.qicon(icon, size))
+        btn.setIconSize(QSize(size, size))
+        self._themed_icons.append((btn, icon, size, False))
+        btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn.clicked.connect(slot)
+        Tooltip.attach(btn, tip, shortcut=shortcut)
+        return btn
 
-        Kaldes to gange: fra ``__init__`` og igen fra
-        ``_rebuild_ui_for_language_change``. **IconFactory maa kun bygges én
-        gang** -- den ejer alle PhotoImages i rootens levetid, og en ny factory
-        pr. sprogskift ville lade de gamle billeder hobe sig op.
+    def _refresh_themed_icons(self) -> None:
+        """Gentegn hvert ikon i den nye tekstfarve efter et lys/moerk-skift.
+
+        ``QIcon`` cacher sine pixmaps, saa det raekker ikke at rydde
+        ikon-cachen -- hver knap skal have et nyt ``QIcon``."""
+        icons_vector.clear_qicon_cache()
+        live = []
+        for btn, name, size, primary in self._themed_icons:
+            try:
+                color = theme.C["selection_fg"] if primary else None
+                btn.setIcon(icons_vector.qicon(name, size, color))
+                live.append((btn, name, size, primary))
+            except RuntimeError:
+                pass          # widget'en er revet ned (sprogskift)
+        self._themed_icons = live
+        if self.page_view is not None:
+            self.page_view.refresh_themed_icons()
+
+    def _build_ui(self) -> None:
+        self._themed_icons: list = []
+        central = QWidget(self)
+        outer = QVBoxLayout(central)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+
+        outer.addWidget(self._build_command_bar())
+        outer.addWidget(theme.hairline("horizontal", central))
+
+        self.page_view = PageView(central, self)
+        outer.addWidget(self.page_view, 1)
+
+        outer.addWidget(theme.hairline("horizontal", central))
+        outer.addWidget(self._build_status_bar())
+        self.setCentralWidget(central)
+
+        self.undo_stack.subscribe(self._update_undo_buttons)
+        self._update_undo_buttons()
+
+    def _build_command_bar(self) -> QWidget:
+        """Én flad raekke med store ikoner over forklarende tekst.
+
+        Raekkefoelge venstre->hoejre: Tilfoej filer · Flet og gem · Gem
+        enkeltfiler ‖ Venstre · Hoejre · Beskaer ‖ [pil-klynge] · Sorter ·
+        Indsaet side · Slet ‖ Fortryd · Gentag ‖ Kodeord -- og hoejrestillet
+        Indstillinger (Windows-konvention).
         """
-        if getattr(self, "icon_factory", None) is None:
-            self.icon_factory = icons_vector.IconFactory(self)
-        self.icons = icons_vector.LazyIconDict(self.icon_factory)
+        bar = QWidget(self)
+        bar.setObjectName("CommandBar")
+        bar.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        lay = QHBoxLayout(bar)
+        lay.setContentsMargins(theme.SPACE["md"], theme.SPACE["sm"],
+                               theme.SPACE["md"], theme.SPACE["sm"])
+        lay.setSpacing(theme.SPACE["xxs"])
 
-    def _start_ipc(self):
+        def sep() -> None:
+            line = theme.hairline("vertical", bar)
+            line.setFixedHeight(46)
+            lay.addSpacing(theme.SPACE["sm"])
+            lay.addWidget(line)
+            lay.addSpacing(theme.SPACE["sm"])
+
+        # --- Filer ---
+        lay.addWidget(self._cmd_button("add", _("Tilføj filer"), self._add,
+                                       primary=True, shortcut="Ctrl+O"))
+        self._merge_btn = self._cmd_button("save", _("Flet og gem"), self._merge,
+                                           primary=True, shortcut="Ctrl+S")
+        lay.addWidget(self._merge_btn)
+        lay.addWidget(self._cmd_button("decrypt", _("Gem enkeltfiler"), self._save_dec,
+                                       shortcut="Ctrl+Shift+S"))
+        lay.addWidget(self._cmd_button(
+            "clipboard", _("Kopiér tekst"), self._copy_to_clipboard,
+            shortcut="Ctrl+Shift+C",
+            tip=_("Kopiér dokumentets tekst — med mulighed for at "
+                  "pseudonymisere personoplysninger først.")))
+        sep()
+
+        # --- Roter / beskaer ---
+        lay.addWidget(self._cmd_button("rotate_left", _("Venstre"), self._rotate_left,
+                                       shortcut="Ctrl+Left"))
+        lay.addWidget(self._cmd_button("rotate_right", _("Højre"), self._rotate_right,
+                                       shortcut="Ctrl+Right"))
+        self._crop_btn = self._cmd_button(
+            "crop", _("Beskær"), self._toggle_crop_tool, checkable=True,
+            tip=_("Træk en ramme for at beskære den viste side"))
+        lay.addWidget(self._crop_btn)
+        sep()
+
+        # --- Tekstgenkendelse og anonymisering ---
+        # OCR staar til VENSTRE for Anonymiser: paa en scanning er den
+        # forudsaetningen for baade at kunne markere tekst og for at
+        # anonymiseringen finder andet end tal.
+        lay.addWidget(self._cmd_button(
+            "ocr_run", _("Tekstgenkendelse"), self._run_ocr,
+            tip=_("Kør tekstgenkendelse på scannede filer, så du kan markere tekst.")))
+        self._anon_btn = self._cmd_button(
+            "anonymize", _("Anonymiser"), self._start_anonymize,
+            tip=lambda: self._anon_tip())
+        self._anon_btn.setEnabled(pii.availability()[0])
+        lay.addWidget(self._anon_btn)
+        sep()
+
+        # --- Raekkefoelge: kompakt 2x2 pil-klynge + sorter + indsaet + slet ---
+        order = QWidget(bar)
+        grid = QGridLayout(order)
+        grid.setContentsMargins(0, 0, 0, 0)
+        grid.setSpacing(theme.SPACE["xxs"])
+        grid.addWidget(self._icon_button("up", _("Flyt op"), self._up,
+                                         shortcut="Alt+Up"), 0, 0)
+        grid.addWidget(self._icon_button("down", _("Flyt ned"), self._down,
+                                         shortcut="Alt+Down"), 1, 0)
+        grid.addWidget(self._icon_button("top", _("Flyt øverst"), self._move_top,
+                                         shortcut="Alt+Home"), 0, 1)
+        grid.addWidget(self._icon_button("bottom", _("Flyt nederst"), self._move_bottom,
+                                         shortcut="Alt+End"), 1, 1)
+        lay.addWidget(order)
+        lay.addSpacing(theme.SPACE["xs"])
+
+        self._sort_btn = self._cmd_button("sort", _("Sorter"), self._toggle_sort_panel,
+                                          tip=_("Sortér filerne"), checkable=True)
+        lay.addWidget(self._sort_btn)
+        lay.addWidget(self._cmd_button(
+            "insert_page", _("Indsæt side"), self._open_insert_page_dialog,
+            tip=_("Indsæt en ny side med overskrift og tekst")))
+        lay.addWidget(self._cmd_button("delete", _("Slet"), self._delete_selection,
+                                       shortcut="Delete"))
+        sep()
+
+        # --- Fortryd / gentag ---
+        self._undo_btn = self._cmd_button("undo_preview", _("Fortryd"), self._do_undo,
+                                          shortcut="Ctrl+Z")
+        self._redo_btn = self._cmd_button("redo_preview", _("Gentag"), self._do_redo,
+                                          shortcut="Ctrl+Y")
+        self._undo_btn.setEnabled(False)
+        self._redo_btn.setEnabled(False)
+        lay.addWidget(self._undo_btn)
+        lay.addWidget(self._redo_btn)
+        self._history_btn = self._icon_button(
+            "history", _("Historik"), self._toggle_history, shortcut="Ctrl+H")
+        self._history_btn.setEnabled(False)
+        lay.addWidget(self._history_btn)
+        sep()
+
+        # --- Kodeord (tooltip viser antallet) ---
+        lay.addWidget(self._cmd_button(
+            "key", _("Kodeord"), self._open_passwords_dialog,
+            tip=lambda: _("Kodeord (%d gemt)") % len(self._pw_lines)))
+
+        lay.addStretch(1)
+        lay.addWidget(self._cmd_button("settings", _("Indstillinger"),
+                                       self._open_settings_window))
+        return bar
+
+    def _build_status_bar(self) -> QWidget:
+        """Nederste linje: venstre = kontekstuel status, hoejre = version + links."""
+        bar = QWidget(self)
+        bar.setObjectName("StatusBar")
+        bar.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        lay = QHBoxLayout(bar)
+        lay.setContentsMargins(theme.SPACE["md"], theme.SPACE["xs"],
+                               theme.SPACE["md"], theme.SPACE["xs"])
+        lay.setSpacing(theme.SPACE["sm"])
+
+        self._status_label = QLabel(self._default_status(), bar)
+        self._status_label.setObjectName("Muted")
+        self._status_label.setSizePolicy(QSizePolicy.Policy.Expanding,
+                                         QSizePolicy.Policy.Preferred)
+        lay.addWidget(self._status_label, 1)
+
+        lay.addWidget(muted_label("v%s · 2025 · Bo Sundgaard" % __version__, parent=bar))
+        lay.addWidget(muted_label("·", parent=bar))
+        lay.addWidget(LinkLabel("www.uniteapps.dk", bar, url="https://www.uniteapps.dk"))
+        lay.addWidget(muted_label("·", parent=bar))
+        creds = LinkLabel(_("Credits"), bar)
+        creds.clicked.connect(self._show_credits)
+        lay.addWidget(creds)
+        return bar
+
+    def _install_shortcuts(self) -> None:
+        """Globale genveje.
+
+        ``Ctrl+Z``/``Ctrl+Y`` er ``WindowShortcut``, saa et tekstfelt med fokus
+        beholder sin *egen* fortrydelse -- 8.x maatte tjekke ``focus_get()``
+        manuelt for det samme.
+        """
+        def add(seq: str, slot, context=Qt.ShortcutContext.WindowShortcut) -> None:
+            sc = QShortcut(QKeySequence(seq), self)
+            sc.setContext(context)
+            sc.activated.connect(slot)
+
+        add("Ctrl+O", self._add)
+        add("Ctrl+S", self._merge)
+        add("Ctrl+Shift+S", self._save_dec)
+        add("Ctrl+Shift+C", self._copy_to_clipboard)
+        add("Ctrl+Z", self._do_undo)
+        add("Ctrl+Y", self._do_redo)
+        add("Ctrl+Shift+Z", self._do_redo)
+        add("Ctrl+Left", self._rotate_left)
+        add("Ctrl+Right", self._rotate_right)
+        add("Alt+Up", self._up)
+        add("Alt+Down", self._down)
+        add("Alt+Home", self._move_top)
+        add("Alt+End", self._move_bottom)
+        add("Ctrl+H", self._toggle_history)
+        add("Esc", self._on_escape)
+        add("F1", self._show_credits)
+
+    # ------------------------------------------------------------------
+    # Session: vinduets stoerrelse, panelernes fordeling, zoom
+    # ------------------------------------------------------------------
+    _SESSION = "Window"
+    # Mindste klientflade hvor kommandobarens knaptekster staar helt (maalt paa
+    # en 100 %-skaerm). Qt regner i logiske pixels, saa skalering er daekket.
+    _DEFAULT_SIZE = (1510, 1025)
+    # Titellinje + kant, som ``resize()`` ikke medregner.
+    _FRAME_ALLOWANCE = (16, 48)
+    # Geometri gemt foer 1510x1025 blev standard er den gamle, for smalle
+    # 1200x820 -- den genskabes ikke. Hæv tallet hvis standarden skifter igen.
+    _GEOMETRY_VERSION = 2
+
+    def _apply_default_geometry(self) -> None:
+        """Standardstørrelse, skaaret til skaermens frie areal og centreret."""
+        w, h = self._DEFAULT_SIZE
+        screen = QApplication.primaryScreen()
+        if screen is None:
+            self.resize(w, h)
+            return
+        avail = screen.availableGeometry()
+        w = min(w, avail.width() - self._FRAME_ALLOWANCE[0])
+        h = min(h, avail.height() - self._FRAME_ALLOWANCE[1])
+        self.resize(w, h)
+        self.move(avail.x() + (avail.width() - w) // 2,
+                  avail.y() + max(0, (avail.height() - h - self._FRAME_ALLOWANCE[1]) // 2))
+
+    def _restore_session(self) -> None:
+        """Genskab sidste kørsels vindue og paneler.
+
+        Alt er valgfrit og pakket ind: en beskadiget eller forældet vaerdi maa
+        aldrig forhindre opstart -- saa faar man blot standardlayoutet."""
+        cfg = self.config
+        try:
+            geo = cfg.get(self._SESSION, "geometry", fallback="")
+            version = cfg.getint(self._SESSION, "geometry_version", fallback=0)
+            if geo and version >= self._GEOMETRY_VERSION:
+                from PySide6.QtCore import QByteArray
+                self.restoreGeometry(QByteArray.fromBase64(geo.encode("ascii")))
+        except Exception as e:
+            logger.debug("Kunne ikke genskabe vinduesgeometri: %s", e)
+        try:
+            sizes = [int(v) for v in
+                     (cfg.get(self._SESSION, "splitter", fallback="") or "").split(",")
+                     if v.strip()]
+            if len(sizes) == 3 and sum(sizes) > 0:
+                self.page_view.splitter.setSizes(sizes)
+                self.page_view.set_file_list_visible(sizes[0] > 20)
+        except Exception as e:
+            logger.debug("Kunne ikke genskabe panelbredder: %s", e)
+        try:
+            self.page_view.set_tile_scale(
+                cfg.getint(self._SESSION, "tile_scale", fallback=100))
+        except Exception as e:
+            logger.debug("Kunne ikke genskabe miniaturestørrelse: %s", e)
+
+    def _save_session(self) -> None:
+        cfg = self.config
+        try:
+            cfg.set(self._SESSION, "geometry",
+                    bytes(self.saveGeometry().toBase64()).decode("ascii"))
+            cfg.set(self._SESSION, "geometry_version", str(self._GEOMETRY_VERSION))
+            if self.page_view is not None:
+                cfg.set(self._SESSION, "splitter",
+                        ",".join(str(v) for v in self.page_view.splitter.sizes()))
+                cfg.set(self._SESSION, "tile_scale",
+                        str(self.page_view.tile_scale()))
+            cfg.save()
+        except Exception as e:
+            logger.warning("Kunne ikke gemme sessionen: %s", e)
+
+    def _first_paint(self) -> None:
+        if self.page_view is not None:
+            self.page_view.rebuild()
+            self.page_view.setFocus()
+
+    # ------------------------------------------------------------------
+    # IPC
+    # ------------------------------------------------------------------
+    def _start_ipc(self) -> None:
         from . import ipc
-        hwnd = self.winfo_id()
         ipc.start_ipc_server(
-            schedule_callback=lambda paths: self.after(0, lambda: self._receive_ipc_paths(paths)),
-            hwnd=hwnd
-        )
+            schedule_callback=lambda paths: self._queue.put((self._receive_ipc_paths, (paths,))),
+            hwnd=int(self.winId()))
 
-    def _receive_ipc_paths(self, paths: list[str]):
+    def _receive_ipc_paths(self, paths: list[str]) -> None:
         self._add_paths(paths)
-        self.lift()
-        self.focus_force()
+        self.raise_()
+        self.activateWindow()
 
     # ------------------------------------------------------------------
-    # Autoupdater. Logikken (HTTP, hash, procesudløsning) ligger i
-    # ``updater.py``; her er kun planlægning, trådmarshalling og UI.
+    # Autoupdater. Logikken (HTTP, hash, procesudloesning) ligger i
+    # ``updater.py``; her er kun planlaegning, traadmarshalling og UI.
     # ------------------------------------------------------------------
-
     def _updates_dir(self) -> Path:
         return utils.get_app_data_path(updater.DOWNLOAD_SUBDIR)
 
-    def _start_update_check(self, manual: bool = False):
-        """Ugentligt (eller manuelt udløst) tjek for en nyere version."""
-        self._update_after_id = None
+    def start_update_check(self, manual: bool = False) -> None:
+        """Ugentligt (eller manuelt udloest) tjek for en nyere version."""
         if self._update_busy:
             if manual:
-                self.set_status(_("Søger allerede efter opdateringer…"),
-                                transient_ms=4000)
+                self.set_status(_("Søger allerede efter opdateringer…"), transient_ms=4000)
             return
         if not manual:
             if not self.config.getboolean("Updates", "auto_check", fallback=True):
                 return
             try:
-                last = float(self.config.get("Updates", "last_check",
-                                             fallback="0") or 0)
+                last = float(self.config.get("Updates", "last_check", fallback="0") or 0)
             except (TypeError, ValueError):
                 last = 0.0
             if time.time() - last < updater.CHECK_INTERVAL_S:
                 return
 
-        # Stemplet sættes FØR tjekket, ikke efter. Ellers ville en netværksfejl
-        # betyde et nyt forsøg ved hver eneste opstart i stedet for om en uge.
+        # Stemplet saettes FOER tjekket, ikke efter. Ellers ville en netvaerksfejl
+        # betyde et nyt forsoeg ved hver eneste opstart i stedet for om en uge.
         self.config.set("Updates", "last_check", str(int(time.time())))
         self.config.save()
 
@@ -231,7 +539,7 @@ class PDFTool(tk.Tk):
         def worker():
             try:
                 updater.purge_old_downloads(updates_dir)
-            except Exception as exc:                      # oprydning må aldrig vælte tjekket
+            except Exception as exc:      # oprydning maa aldrig vaelte tjekket
                 logger.debug("Oprydning i %s fejlede: %s", updates_dir, exc)
             try:
                 info, err = updater.check(current), None
@@ -239,25 +547,20 @@ class PDFTool(tk.Tk):
                 info, err = None, exc
             self._queue.put((self._on_update_check_result, (info, manual, err)))
 
-        threading.Thread(target=worker, daemon=True, name="update-check").start()
+        qt_util.run_in_thread(worker, name="update-check")
 
-    def _on_update_check_result(self, info, manual, err=None):
-        """Kører på hovedtråden via ``_process_queue``."""
+    def _on_update_check_result(self, info, manual, err=None) -> None:
         self._update_busy = False
-        if not self.winfo_exists():
-            return
         if err is not None:
             logger.warning("Opdateringstjek mislykkedes: %s", err)
             if manual:
-                self._show_custom_dialog(
-                    _("Opdatering"),
-                    _("Kunne ikke kontakte serveren:\n%s") % err, "error")
+                qt_util.error(self, _("Opdatering"),
+                              _("Kunne ikke kontakte serveren:\n%s") % err)
             return
         if info is None or not info.update_available:
             if manual:
-                self._show_custom_dialog(
-                    _("Opdatering"),
-                    _("Du kører allerede den nyeste version (%s).") % __version__)
+                qt_util.info(self, _("Opdatering"),
+                             _("Du kører allerede den nyeste version (%s).") % __version__)
             return
 
         skipped = (self.config.get("Updates", "skipped_version", fallback="") or "").strip()
@@ -265,193 +568,85 @@ class PDFTool(tk.Tk):
             logger.info("Version %s er sprunget over af brugeren.", info.version)
             return
 
-        choice = self._show_update_dialog(info)
+        choice = dialogs.UpdateDialog(self, info).run()
         if choice == "skip":
             self.config.set("Updates", "skipped_version", info.version)
             self.config.save()
-            self.set_status(_("Version %s springes over.") % info.version,
-                            transient_ms=6000)
+            self.set_status(_("Version %s springes over.") % info.version, transient_ms=6000)
         elif choice == "install":
             self._run_update_download(info)
 
-    def _show_update_dialog(self, info) -> str:
-        """Modal dialog. Returnerer ``"install"``, ``"later"`` eller ``"skip"``."""
-        dialog = tk.Toplevel(self)
-        dialog.title(_("Opdatering tilgængelig"))
-        dialog.transient(self)
-        dialog.resizable(False, False)
-        dialog.configure(background=theme.C["bg"])
-
-        result = {"v": "later"}
-        body = ttk.Frame(dialog, padding=(18, 14))
-        body.pack(fill="both", expand=True)
-
-        ttk.Label(body, text=_("Der er en ny version af Unite Docs"),
-                  font=theme.FONTS["title"]).pack(anchor="w")
-        ttk.Label(body,
-                  text=_("Version %s er klar. Du kører version %s.")
-                       % (info.version, __version__),
-                  wraplength=460, justify="left").pack(anchor="w", pady=(6, 0))
-        if info.size:
-            ttk.Label(body, text=_("Download: %s") % self._fmt_bytes(info.size),
-                      foreground=theme.C["text_muted"],
-                      font=theme.FONTS["small"]).pack(anchor="w", pady=(2, 0))
-
-        if info.release_notes:
-            ttk.Label(body, text=_("Nyt i denne version:"),
-                      font=theme.FONTS["strong"]).pack(anchor="w", pady=(12, 4))
-            notes_wrap = ttk.Frame(body)
-            notes_wrap.pack(fill="both", expand=True)
-            notes = tk.Text(notes_wrap, height=9, width=58, wrap="word")
-            scroll = ttk.Scrollbar(notes_wrap, orient="vertical", command=notes.yview)
-            notes.configure(yscrollcommand=scroll.set)
-            theme.style_text(notes)
-            notes.insert("1.0", info.release_notes)
-            notes.configure(state="disabled")
-            scroll.pack(side="right", fill="y")
-            notes.pack(side="left", fill="both", expand=True)
-
-        ttk.Separator(dialog, orient="horizontal").pack(fill="x")
-        bar = ttk.Frame(dialog, padding=(18, 10))
-        bar.pack(fill="x")
-
-        def choose(value):
-            result["v"] = value
-            dialog.destroy()
-
-        ttk.Button(bar, text=_("Opdater nu"), style="Accent.TButton",
-                   command=lambda: choose("install")).pack(side="right")
-        ttk.Button(bar, text=_("Ikke nu"),
-                   command=lambda: choose("later")).pack(side="right", padx=(0, 6))
-        ttk.Button(bar, text=_("Spring denne version over"),
-                   command=lambda: choose("skip")).pack(side="left")
-
-        dialog.bind("<Escape>", lambda _e: choose("later"))
-        dialog.protocol("WM_DELETE_WINDOW", lambda: choose("later"))
-        dialog.update_idletasks()
-        x = self.winfo_rootx() + (self.winfo_width() - dialog.winfo_width()) // 2
-        y = self.winfo_rooty() + (self.winfo_height() - dialog.winfo_height()) // 3
-        dialog.geometry("+%d+%d" % (max(0, x), max(0, y)))
-        dialog.grab_set()
-        dialog.wait_window()
-        return result["v"]
-
-    def _run_update_download(self, info):
-        p = self._show_progress_dialog(
-            _("Henter opdatering"),
+    def _run_update_download(self, info) -> None:
+        prog = qt_util.ProgressDialog(
+            self, _("Henter opdatering"),
             _("Henter Unite Docs %s…") % info.version, cancellable=True)
+        prog.show()
         dest = self._updates_dir()
-        cancel = p["cancel"]
+        cancel = prog.cancel_event
 
         def worker():
             try:
                 path = updater.download(
                     info, dest,
                     progress_cb=lambda done, total: self._queue.put(
-                        (self._update_download_progress, (p, done, total))),
+                        (prog.set_bytes, (done, total))),
                     cancel_event=cancel)
             except Exception as exc:
-                self._queue.put((self._update_failed, (p, exc, info)))
+                self._queue.put((self._update_failed, (prog, exc, info)))
                 return
-            self._queue.put((self._finish_update, (p, path, info)))
+            self._queue.put((self._finish_update, (prog, path, info)))
 
-        threading.Thread(target=worker, daemon=True, name="update-download").start()
+        qt_util.run_in_thread(worker, name="update-download")
 
-    def _update_download_progress(self, p_widgets, done, total):
-        if not p_widgets["window"].winfo_exists():
-            return
-        if total:
-            p_widgets["bar"].config(mode="determinate", maximum=total, value=done)
-            p_widgets["label"].config(
-                text=_("Hentet %s af %s")
-                     % (self._fmt_bytes(done), self._fmt_bytes(total)))
-        else:
-            p_widgets["label"].config(text=_("Hentet %s") % self._fmt_bytes(done))
-
-    def _finish_update(self, p_widgets, path, info):
-        self._destroy_progress(p_widgets)
-        if not self.winfo_exists():
-            return
+    def _finish_update(self, prog, path, info) -> None:
+        prog.finish()
         if not updater.can_install():
-            # Kører fra kildekode: en installer ville skrive et helt andet sted
-            # end den kørende app. Peg brugeren mod hjemmesiden i stedet.
-            self._show_update_link_dialog(
-                _("Opdatering hentet"),
+            # Koerer fra kildekode: en installer ville skrive et helt andet sted
+            # end den koerende app. Peg brugeren mod hjemmesiden i stedet.
+            dialogs.UpdateLinkDialog(
+                self, _("Opdatering hentet"),
                 _("Installationen kan kun køres fra en installeret udgave. "
                   "Filen ligger her, og hentesiden er åbnet i browseren."),
-                info, extra_path=path)
+                info, extra_path=path,
+                on_open_file=lambda p: self._open_in_explorer(p, select=True)).show()
             return
 
-        self._show_custom_dialog(
-            _("Installerer opdatering"),
-            _("Unite Docs lukker nu og åbner igen, når version %s er "
-              "installeret.") % info.version)
+        qt_util.info(self, _("Installerer opdatering"),
+                     _("Unite Docs lukker nu og åbner igen, når version %s er "
+                       "installeret.") % info.version)
         try:
             updater.launch_installer(path, Path(sys.executable))
         except Exception as exc:
             logger.error("Kunne ikke starte installeren: %s", exc)
-            self._show_update_link_dialog(
-                _("Installationen kunne ikke startes"),
-                _("Filen blev hentet, men installeren kunne ikke startes:\n%s")
-                % exc, info, extra_path=path)
+            dialogs.UpdateLinkDialog(
+                self, _("Installationen kunne ikke startes"),
+                _("Filen blev hentet, men installeren kunne ikke startes:\n%s") % exc,
+                info, extra_path=path,
+                on_open_file=lambda p: self._open_in_explorer(p, select=True)).show()
             return
-        self._on_closing()
+        self.close()
 
-    def _update_failed(self, p_widgets, exc, info):
-        self._destroy_progress(p_widgets)
-        if not self.winfo_exists():
-            return
+    def _update_failed(self, prog, exc, info) -> None:
+        prog.finish()
         if isinstance(exc, updater.UpdateCancelled):
             self.set_status(_("Download afbrudt."), transient_ms=5000)
             return
         logger.error("Download af opdatering fejlede: %s", exc)
-        self._show_update_link_dialog(
-            _("Opdateringen kunne ikke hentes"),
+        dialogs.UpdateLinkDialog(
+            self, _("Opdateringen kunne ikke hentes"),
             _("Du kan hente installeren manuelt fra hjemmesiden.\n\n%s") % exc,
-            info)
+            info).show()
 
-    def _show_update_link_dialog(self, title, message, info, extra_path=None):
-        """Fejl-/fallback-dialog med et klikbart link til hentesiden."""
-        import webbrowser
-
-        url = getattr(info, "info_url", None) or updater.INFO_URL
-        dlg = tk.Toplevel(self)
-        dlg.title(title)
-        dlg.transient(self)
-        dlg.resizable(False, False)
-        body = ttk.Frame(dlg, padding=(18, 14))
-        body.pack(fill="both", expand=True)
-        ttk.Label(body, text=message, wraplength=440, justify="left").pack(anchor="w")
-
-        link = ttk.Label(body, text=url, foreground=theme.C["link"], cursor="hand2",
-                         font=theme.FONTS["link"], wraplength=440, justify="left")
-        link.pack(anchor="w", pady=(10, 0))
-        link.bind("<Button-1>", lambda _e: webbrowser.open(url))
-
-        if extra_path is not None:
-            file_link = ttk.Label(body, text=str(extra_path),
-                                  foreground=theme.C["link"], cursor="hand2",
-                                  font=theme.FONTS["link"], wraplength=440,
-                                  justify="left")
-            file_link.pack(anchor="w", pady=(4, 0))
-            file_link.bind("<Button-1>",
-                           lambda _e: self._open_in_explorer(Path(extra_path), select=True))
-
-        ttk.Separator(dlg, orient="horizontal").pack(fill="x")
-        bar = ttk.Frame(dlg, padding=(18, 10))
-        bar.pack(fill="x")
-        ok = ttk.Button(bar, text=_("Luk"), style="Accent.TButton", command=dlg.destroy)
-        ok.pack(side="right")
-        dlg.bind("<Escape>", lambda _e: dlg.destroy())
-        dlg.bind("<Return>", lambda _e: dlg.destroy())
-        dlg.update_idletasks()
-        x = self.winfo_rootx() + (self.winfo_width() - dlg.winfo_width()) // 2
-        y = self.winfo_rooty() + (self.winfo_height() - dlg.winfo_height()) // 3
-        dlg.geometry("+%d+%d" % (max(0, x), max(0, y)))
-        ok.focus_set()
-        webbrowser.open(url)
-
-    def _on_closing(self):
+    # ------------------------------------------------------------------
+    # Livscyklus
+    # ------------------------------------------------------------------
+    def closeEvent(self, event):  # noqa: N802 - Qt-API
+        if self._closing:
+            event.accept()
+            return
+        self._closing = True
+        self._save_session()
+        self._queue.shutdown()
         try:
             from . import ipc
             ipc.cleanup_ipc()
@@ -459,27 +654,23 @@ class PDFTool(tk.Tk):
             pass
         try:
             utils.purge_stale_temp_files(force_all=True)
-            if hasattr(self, 'page_render_mgr'):
-                self.page_render_mgr.stop()
+            self.page_render_mgr.stop()
             pdf_renderer.clear_doc_cache()
-            if getattr(self, '_inserted_dir', None) is not None:
+            if self._inserted_dir is not None:
                 utils._force_rmtree(self._inserted_dir)
-        finally:
-            self.destroy()
+        except Exception as e:
+            logger.warning("Oprydning ved lukning fejlede: %s", e)
+        event.accept()
 
-    # _cleanup_temp_files moved to ThumbnailManager
-    
-    def _on_escape(self, event=None):
+    def _on_escape(self) -> None:
         """Escape: afbryd et igangvaerende sidetraek og luk Sorter-panelet."""
         if self.page_view is not None:
             self.page_view.cancel_drag()
         self._close_sort_panel()
 
-    def _periodic_cleanup(self):
-        """Ryd gamle midlertidige filer og planlaeg naeste koersel."""
-        utils.purge_stale_temp_files()
-        self.after(30000, self._periodic_cleanup)
-
+    # ------------------------------------------------------------------
+    # Kodeords-cache paa disk
+    # ------------------------------------------------------------------
     def _get_password_cache_path(self) -> Path:
         return utils.get_app_data_path() / "password_cache.txt"
 
@@ -488,39 +679,52 @@ class PDFTool(tk.Tk):
         if not cache_path.exists():
             return []
         try:
-            with open(cache_path, 'r', encoding='utf-8') as f:
+            with open(cache_path, "r", encoding="utf-8") as f:
                 return [line.strip() for line in f if line.strip()]
-        except (OSError, IOError) as e:
+        except OSError as e:
             logger.error("Fejl ved indlæsning af adgangskode-cache: %s", e)
             return []
 
-    def _save_password_to_cache(self, password: str):
+    def _save_password_to_cache(self, password: str) -> None:
+        """Kaldes ogsaa fra worker-traade. Roerer kun disk, aldrig widgets."""
         if not password:
             return
         cache_path = self._get_password_cache_path()
         try:
-            existing_passwords = set(self._load_cached_passwords())
-            if password not in existing_passwords:
-                with open(cache_path, 'a', encoding='utf-8') as f:
-                    f.write(password + '\n')
-                # Performance: invalidate in-memory cache so next call re-reads from disk
+            if password not in set(self._load_cached_passwords()):
+                with open(cache_path, "a", encoding="utf-8") as f:
+                    f.write(password + "\n")
                 self._pw_cache = None
-        except (OSError, IOError) as e:
+        except OSError as e:
             logger.error("Fejl ved lagring af adgangskode til cache: %s", e)
 
+    def _pwlist(self) -> list[str]:
+        return list(dict.fromkeys(l.strip() for l in self._pw_lines if l.strip()))
+
     def _get_all_passwords(self) -> list[str]:
-        # Performance: return cached list if available; avoids repeated disk reads.
-        # Cache is invalidated by _save_password_to_cache() when new passwords are stored.
+        """GUI-indtastede + cachede kodeord, uden dubletter. Cachet i hukommelsen;
+        invalideres af ``_save_password_to_cache``."""
         if self._pw_cache is not None:
             return self._pw_cache
-        gui_passwords = self._pwlist()
-        cached_passwords = self._load_cached_passwords()
-        combined = gui_passwords + cached_passwords
-        self._pw_cache = list(dict.fromkeys(combined))
+        self._pw_cache = list(dict.fromkeys(self._pwlist() + self._load_cached_passwords()))
         return self._pw_cache
 
-    def _insert_page_dir(self):
-        """Session-mappen til genererede sider (oprettes ved første brug)."""
+    def clear_password_cache(self) -> None:
+        cache_path = self._get_password_cache_path()
+        if not cache_path.exists():
+            qt_util.info(self, _("Cache"), _("Ingen kodeordscache fundet."))
+            return
+        try:
+            os.remove(cache_path)
+            self._pw_cache = None
+            qt_util.info(self, _("Cache slettet"), _("Alle gemte kodeord er slettet."))
+        except Exception as e:
+            qt_util.error(self, _("Fejl"), _("Kunne ikke slette cache: %s") % e)
+
+    # ------------------------------------------------------------------
+    # Indsæt side
+    # ------------------------------------------------------------------
+    def _insert_page_dir(self) -> Path:
         if self._inserted_dir is None:
             self._inserted_dir = utils.new_inserted_pages_dir()
         return self._inserted_dir
@@ -529,111 +733,29 @@ class PDFTool(tk.Tk):
     def _safe_filename(name: str, fallback: str) -> str:
         """Gør en overskrift brugbar som filnavn. Navnet er ikke kosmetik: det
         bliver kapiteltitlen i md/ePub-eksport (``FileJob.title``)."""
-        cleaned = "".join(ch for ch in (name or "") if ch not in '\\\\/:*?"<>|').strip()
+        cleaned = "".join(ch for ch in (name or "") if ch not in '\\/:*?"<>|').strip()
         cleaned = " ".join(cleaned.split())[:60]
         return cleaned or fallback
 
-    def _open_insert_page_dialog(self):
-        """Editor til en ny side: overskrift + fritekst. Ved OK spørges der om
-        siden skal ligge før eller efter den markerede side/fil."""
-        if getattr(self, "_insert_dialog", None) is not None and self._insert_dialog.winfo_exists():
-            self._insert_dialog.deiconify()
-            self._insert_dialog.lift()
+    def _open_insert_page_dialog(self) -> None:
+        if self._insert_dialog is not None:
+            self._insert_dialog.show()
+            self._insert_dialog.raise_()
+            self._insert_dialog.activateWindow()
             return
-        dlg = tk.Toplevel(self)
-        dlg.title(_("Indsæt side"))
-        dlg.transient(self)
-        dlg.resizable(True, True)
+        dlg = dialogs.InsertPageDialog(self)
         self._insert_dialog = dlg
-
-        top = ttk.Frame(dlg, padding=(12, 12, 12, 0))
-        top.pack(fill="x")
-        ttk.Label(top, text=_("Overskrift")).pack(anchor="w")
-        head_var = tk.StringVar()
-        head = ttk.Entry(top, textvariable=head_var, width=52)
-        head.pack(fill="x", pady=(2, 0))
-
-        body_frame = ttk.Frame(dlg, padding=(12, 10, 12, 0))
-        body_frame.pack(fill="both", expand=True)
-        ttk.Label(body_frame, text=_("Tekst")).pack(anchor="w")
-        box = ttk.Frame(body_frame)
-        box.pack(fill="both", expand=True, pady=(2, 0))
-        txt = tk.Text(box, width=52, height=14, wrap="word", undo=True)
-        theme.style_text(txt)
-        sb = ttk.Scrollbar(box, orient="vertical", command=txt.yview)
-        txt.configure(yscrollcommand=sb.set)
-        sb.pack(side="right", fill="y")
-        txt.pack(side="left", fill="both", expand=True)
-
-        def close():
-            self._insert_dialog = None
-            dlg.destroy()
-
-        def ok():
-            heading = head_var.get().strip()
-            body = txt.get("1.0", "end-1c")
-            if not heading and not body.strip():
-                messagebox.showinfo(_("Indsæt side"),
-                                    _("Skriv en overskrift eller noget tekst først."),
-                                    parent=dlg)
-                return
-            close()
-            self._insert_page(heading, body)
-
-        bar = ttk.Frame(dlg, padding=12)
-        bar.pack(fill="x")
-        ttk.Button(bar, text=_("Indsæt"), style="Accent.TButton", command=ok).pack(side="right")
-        ttk.Button(bar, text=_("Annuller"), command=close).pack(side="right", padx=(0, 6))
-        dlg.protocol("WM_DELETE_WINDOW", close)
-        dlg.bind("<Escape>", lambda e: close())
-        dlg.update_idletasks()
-        dlg.geometry("+%d+%d" % (self.winfo_x() + 80, self.winfo_y() + 80))
-        head.focus_set()
-
-    def _ask_before_after(self, question: str):
-        """Modal dialog: Før / Efter / Annuller. Returnerer "before", "after"
-        eller None.
-
-        Bygget som en Toplevel frem for ``messagebox.askquestion``, fordi de
-        indbyggede knaptekster ikke kan oversættes gennem vores egen
-        ``_()``-kæde."""
-        dlg = tk.Toplevel(self)
-        dlg.title(_("Indsæt side"))
-        dlg.transient(self)
-        dlg.resizable(False, False)
-        dlg.grab_set()
-        result = {"value": None}
-
-        ttk.Label(dlg, text=question, wraplength=380).pack(
-            padx=16, pady=(16, 0), anchor="w")
-
-        def choose(value):
-            result["value"] = value
-            dlg.destroy()
-
-        bar = ttk.Frame(dlg, padding=16)
-        bar.pack(fill="x")
-        after_btn = ttk.Button(bar, text=_("Efter"), style="Accent.TButton",
-                               command=lambda: choose("after"))
-        after_btn.pack(side="right")
-        ttk.Button(bar, text=_("Før"), command=lambda: choose("before")).pack(
-            side="right", padx=(0, 6))
-        ttk.Button(bar, text=_("Annuller"), command=lambda: choose(None)).pack(
-            side="right", padx=(0, 6))
-        dlg.protocol("WM_DELETE_WINDOW", lambda: choose(None))
-        dlg.bind("<Escape>", lambda e: choose(None))
-        dlg.update_idletasks()
-        dlg.geometry("+%d+%d" % (self.winfo_x() + 120, self.winfo_y() + 140))
-        after_btn.focus_set()
-        self.wait_window(dlg)
-        return result["value"]
+        dlg.submitted.connect(self._insert_page)
+        dlg.destroyed.connect(lambda: setattr(self, "_insert_dialog", None))
+        dlg.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
+        dlg.show()
 
     def _build_inserted_pdf(self, heading: str, body: str):
         """Skriv den genererede side til session-mappen. Returnerer (sti, antal
-        sider) — en lang fritekst flyder over flere sider — eller (None, 0)."""
+        sider) -- en lang fritekst flyder over flere sider -- eller (None, 0)."""
         buf = utils.create_text_page_pdf(heading, body)
         if buf is None:
-            messagebox.showerror(_("Indsæt side"), _("Siden kunne ikke oprettes."))
+            qt_util.error(self, _("Indsæt side"), _("Siden kunne ikke oprettes."))
             return None, 0
         target_dir = self._insert_page_dir() / uuid.uuid4().hex
         try:
@@ -645,606 +767,60 @@ class PDFTool(tk.Tk):
                 count = doc.page_count
         except Exception as e:
             logger.error("Kunne ikke gemme indsat side: %s", e)
-            messagebox.showerror(_("Indsæt side"), _("Siden kunne ikke oprettes."))
+            qt_util.error(self, _("Indsæt side"), _("Siden kunne ikke oprettes."))
             return None, 0
         return str(path), count
 
-    def _insert_page(self, heading: str, body: str):
-        """Byg siden og læg den ind i modellen på den plads brugeren vælger."""
-        self._insert_page_in_page_view(heading, body)
-
-    def _insert_page_in_page_view(self, heading: str, body: str):
-        uid = getattr(self.page_view, "_selected_uid", None)
+    def _insert_page(self, heading: str, body: str) -> None:
+        """Byg siden og laeg den ind i modellen paa den plads brugeren vaelger."""
+        uid = self.page_view.selected_page_uid() if self.page_view else None
         found = self.model.page_by_uid(uid) if uid else None
         if found is None:
-            # Ingen markeret side: læg siden sidst i dokumentet.
-            return self._insert_page_as_file(heading, body, index=None)
+            return self._insert_page_as_file(heading, body)
         entry, page = found
         num = self.page_view.page_number_label(uid)
         if num and num.isdigit():
             question = _("Skal siden oprettes før eller efter side %s?") % num
         else:
             question = _("Skal siden oprettes før eller efter den markerede side?")
-        where = self._ask_before_after(question)
+        where = dialogs.ask_before_after(self, question)
         if where is None:
             return
         path, count = self._build_inserted_pdf(heading, body)
         if not path:
             return
-        # Siderne lægges ind i den markerede sides FIL, men med deres egen
-        # src_path — modellen tillader netop det (se edit_model.PageEdit).
+        # Siderne laegges ind i den markerede sides FIL, men med deres egen
+        # src_path -- modellen tillader netop det (se edit_model.PageEdit).
         file_index = self.model.index_of_iid(entry.iid)
         pos = entry.pages.index(page) + (1 if where == "after" else 0)
         pages = [em.PageEdit(src_path=path, src_index=i) for i in range(count)]
         self.undo_stack.push(em.insert_pages_cmd(self.model, file_index, pos, pages))
         self.page_view.rebuild()
-        self.page_view._select_and_reveal(pages[0].uid)
-        self._refresh_status()
+        self.page_view.select_and_reveal(pages[0].uid)
         self.set_status(_("Side indsat"), transient_ms=4000, kind="success")
 
-    def _insert_page_as_file(self, heading: str, body: str, index=None):
-        """Læg den genererede side ind som sin EGEN fil i listen (filvisning, og
-        når der ingen markeret side er)."""
+    def _insert_page_as_file(self, heading: str, body: str, index=None) -> None:
+        """Laeg den genererede side ind som sin EGEN fil (naar ingen side er markeret)."""
         path, count = self._build_inserted_pdf(heading, body)
         if not path:
             return
         entry = em.FileEntry(
-            iid=uuid.uuid4().hex,
-            path=path,
-            kind=em.KIND_PDF,
-            enc_key=pdf_utils.ENC_NOT_ENCRYPTED,
-            creation_date="",
-            source_page_count=count,
-        )
+            iid=uuid.uuid4().hex, path=path, kind=em.KIND_PDF,
+            enc_key=pdf_utils.ENC_NOT_ENCRYPTED, creation_date="",
+            source_page_count=count)
         self.model.populate_pages(entry, count)
         at = len(self.model.files) if index is None else index
-
-        def do():
-            self.model.add_file(entry, at)
-
-        def undo():
-            self.model.remove_file(entry.iid)
-
-        self.undo_stack.push(Command("Indsæt side", do, undo))
+        self.undo_stack.push(Command(
+            "Indsæt side",
+            lambda: self.model.add_file(entry, at),
+            lambda: self.model.remove_file(entry.iid)))
         if self.page_view is not None:
             self.page_view.rebuild()
-        self._refresh_status()
         self.set_status(_("Side indsat"), transient_ms=4000, kind="success")
 
-    def _show_progress_dialog(self, title: str, text: str, cancellable: bool = False) -> dict:
-        win = tk.Toplevel(self)
-        win.title(title)
-        win.transient(self)
-        win.grab_set()
-        win.resizable(False, False)
-        ttk.Label(win, text=text, font=("Segoe UI", 10)).pack(pady=(10, 0), padx=10)
-        status_label = ttk.Label(win, text=_("Initialiserer..."), font=("Segoe UI", 9))
-        status_label.pack(pady=5, padx=10, anchor="w")
-        bar = ttk.Progressbar(win, mode="determinate", length=380)
-        bar.pack(fill="x", padx=20, pady=(0, 6))
-        elapsed_label = ttk.Label(win, text="", font=("Segoe UI", 8),
-                                  foreground=theme.C["text_muted"])
-        elapsed_label.pack(padx=20, anchor="w")
-        p = {"window": win, "bar": bar, "label": status_label, "elapsed": elapsed_label,
-             "start": time.time(), "cancel": None, "_conv_start": None}
-
-        def tick():
-            if not win.winfo_exists():
-                return
-            elapsed_label.config(text=_("Forløbet: %s") % self._fmt_secs(time.time() - p["start"]))
-            win.after(1000, tick)
-        tick()
-
-        if cancellable:
-            ev = threading.Event()
-            p["cancel"] = ev
-            cancel_btn = ttk.Button(win, text=_("Annuller"))
-
-            def do_cancel():
-                ev.set()
-                status_label.config(text=_("Annullerer…"))
-                try:
-                    cancel_btn.config(state="disabled")
-                except tk.TclError:
-                    pass
-            cancel_btn.config(command=do_cancel)
-            cancel_btn.pack(pady=(4, 10))
-            win.protocol("WM_DELETE_WINDOW", do_cancel)
-        else:
-            win.protocol("WM_DELETE_WINDOW", lambda: None)
-        win.geometry("440x180")
-        win.update()
-        return p
-
-    @staticmethod
-    def _fmt_bytes(num) -> str:
-        """``24941445`` -> ``"23,8 MB"`` (dansk decimalkomma)."""
-        try:
-            value = float(num or 0)
-        except (TypeError, ValueError):
-            return "-"
-        for unit in ("B", "KB", "MB", "GB"):
-            if value < 1024 or unit == "GB":
-                if unit == "B":
-                    return "%d B" % int(value)
-                return ("%.1f %s" % (value, unit)).replace(".", ",")
-            value /= 1024.0
-        return "-"
-
-    @staticmethod
-    def _fmt_secs(secs) -> str:
-        secs = int(secs)
-        if secs < 60:
-            return "%ds" % secs
-        return "%dm %02ds" % (secs // 60, secs % 60)
-
-    def report_callback_exception(self, exc, val, tb):
-        """Log undtagelser fra Tk-callbacks (knapper, after(), events).
-
-        Tk sluger normalt disse og skriver dem kun til stderr, som er tom i en
-        vinduesbygget exe — så de forsvandt fra loggen. Nu logges de.
-        """
-        logger.critical("Ufanget undtagelse i Tk-callback", exc_info=(exc, val, tb))
-
-    def _open_in_explorer(self, target: Path, select: bool = False):
-        """Aabn en gemt fil (eller dens mappe) i Stifinder.
-
-        ``select=True`` aabner mappen med filen markeret, hvilket er mere
-        brugbart end at aabne selve mappen naar man lige har gemt EN fil.
-        """
-        try:
-            target = Path(target)
-            if select and target.exists():
-                subprocess.Popen(["explorer", "/select,", str(target)])
-            else:
-                os.startfile(str(target))       # noqa: S606 - Windows-app
-        except Exception as e:
-            logger.warning("Kunne ikke aabne %s: %s", target, e)
-            self.set_status(_("Kunne ikke åbne %s") % target, transient_ms=6000,
-                            kind="warning")
-
-    def _show_saved_dialog(self, title, message, target: Path, *, is_folder: bool):
-        """Kvittering efter gem, med et KLIKBART link til resultatet.
-
-        En almindelig ``messagebox`` kan kun vise stien som tekst; her kan man
-        klikke sig direkte hen til filen (eller mappen, naar der blev gemt
-        flere enkeltfiler)."""
-        target = Path(target)
-        dlg = tk.Toplevel(self)
-        dlg.title(title)
-        dlg.transient(self)
-        dlg.resizable(False, False)
-        utils.install_window_icon(dlg)
-        body = ttk.Frame(dlg, padding=(18, 14))
-        body.pack(fill="both", expand=True)
-        ttk.Label(body, text=message, justify="left").pack(anchor="w")
-
-        link_text = target.name if not is_folder else str(target)
-        link = ttk.Label(body, text=link_text, foreground=theme.C["link"],
-                         cursor="hand2", font=theme.FONTS["link"], wraplength=460,
-                         justify="left")
-        link.pack(anchor="w", pady=(8, 0))
-        link.bind("<Button-1>",
-                  lambda _e: self._open_in_explorer(target, select=not is_folder))
-
-        hint = _("Klik for at åbne mappen") if is_folder else _("Klik for at åbne filen")
-        ttk.Label(body, text=hint, foreground=theme.C["text_muted"],
-                  font=theme.FONTS["small"]).pack(anchor="w")
-
-        ttk.Separator(dlg, orient="horizontal").pack(fill="x")
-        bar = ttk.Frame(dlg, padding=(18, 10))
-        bar.pack(fill="x")
-        ok = ttk.Button(bar, text=_("Luk"), style="Accent.TButton",
-                        command=dlg.destroy)
-        ok.pack(side="right")
-        dlg.bind("<Escape>", lambda _e: dlg.destroy())
-        dlg.bind("<Return>", lambda _e: dlg.destroy())
-        dlg.update_idletasks()
-        x = self.winfo_rootx() + (self.winfo_width() - dlg.winfo_width()) // 2
-        y = self.winfo_rooty() + (self.winfo_height() - dlg.winfo_height()) // 3
-        dlg.geometry("+%d+%d" % (max(0, x), max(0, y)))
-        ok.focus_set()
-        return dlg
-
-    def _show_custom_dialog(self, title, message, dialog_type="info", parent_window=None):
-        """Shows a custom dialog positioned relative to parent window"""
-        # Create dialog window
-        dialog = tk.Toplevel(self)
-        dialog.title(title)
-        dialog.transient(parent_window if parent_window else self)
-        dialog.grab_set()
-        dialog.resizable(False, False)
-        
-        # Set dialog size
-        dialog_width = 350
-        dialog_height = 150
-        
-        # Position relative to parent window
-        if parent_window:
-            parent_x = parent_window.winfo_x()
-            parent_y = parent_window.winfo_y()
-            parent_width = parent_window.winfo_width()
-            parent_height = parent_window.winfo_height()
-            
-            # Position slightly left and down from parent center
-            x = parent_x + (parent_width - dialog_width) // 2 - 50
-            y = parent_y + (parent_height - dialog_height) // 2 + 30
-        else:
-            # Center on main window
-            x = self.winfo_x() + (self.winfo_width() - dialog_width) // 2
-            y = self.winfo_y() + (self.winfo_height() - dialog_height) // 2
-            
-        dialog.geometry(f"{dialog_width}x{dialog_height}+{x}+{y}")
-        
-        # Create dialog content
-        main_frame = ttk.Frame(dialog)
-        main_frame.pack(fill="both", expand=True, padx=20, pady=20)
-        
-        # Message label
-        message_label = ttk.Label(main_frame, text=message, wraplength=300, justify="center")
-        message_label.pack(pady=(0, 20))
-        
-        # OK button
-        button_frame = ttk.Frame(main_frame)
-        button_frame.pack()
-        
-        def close_dialog():
-            dialog.destroy()
-            
-        ok_button = ttk.Button(button_frame, text="OK", command=close_dialog)
-        ok_button.pack()
-        ok_button.focus_set()
-        
-        # Bind Enter key to close
-        dialog.bind('<Return>', lambda e: close_dialog())
-        dialog.bind('<Escape>', lambda e: close_dialog())
-        
-        # Wait for dialog to close
-        dialog.wait_window()
-
-    def _ask_export_format(self, default=export_formats.FORMAT_PDF):
-        """Modal dialog med radioknapper. Returnerer format-nøglen eller None
-        hvis brugeren annullerer (Esc / Annuller / luk-knap)."""
-        dialog = tk.Toplevel(self)
-        dialog.title(_("Vælg format"))
-        dialog.transient(self)
-        dialog.resizable(False, False)
-
-        dialog_width, dialog_height = 320, 260
-        x = self.winfo_x() + (self.winfo_width() - dialog_width) // 2
-        y = self.winfo_y() + (self.winfo_height() - dialog_height) // 2
-        dialog.geometry(f"{dialog_width}x{dialog_height}+{x}+{y}")
-
-        result = {"fmt": None}
-        fmt_var = tk.StringVar(value=default)
-
-        main_frame = ttk.Frame(dialog)
-        main_frame.pack(fill="both", expand=True, padx=20, pady=15)
-
-        ttk.Label(main_frame, text=_("Vælg outputformat:"),
-                  font=("Segoe UI", 10, "bold")).pack(anchor="w", pady=(0, 8))
-
-        for key in export_formats.FORMAT_ORDER:
-            ttk.Radiobutton(main_frame, text=export_formats.format_label(key),
-                            variable=fmt_var, value=key).pack(anchor="w", pady=1)
-
-        ttk.Label(main_frame,
-                  text=_("Tekstformater bevarer ikke billeder og layout."),
-                  wraplength=280, justify="left",
-                  font=("Segoe UI", 8)).pack(anchor="w", pady=(10, 0))
-
-        button_frame = ttk.Frame(main_frame)
-        button_frame.pack(side="bottom", pady=(12, 0))
-
-        def on_ok():
-            result["fmt"] = fmt_var.get()
-            dialog.destroy()
-
-        def on_cancel():
-            result["fmt"] = None
-            dialog.destroy()
-
-        ttk.Button(button_frame, text=_("OK"), command=on_ok).pack(side="left", padx=4)
-        ttk.Button(button_frame, text=_("Annuller"), command=on_cancel).pack(side="left", padx=4)
-
-        dialog.bind("<Return>", lambda _e: on_ok())
-        dialog.bind("<Escape>", lambda _e: on_cancel())
-        dialog.protocol("WM_DELETE_WINDOW", on_cancel)
-        dialog.grab_set()
-        dialog.wait_window()
-        return result["fmt"]
-
-    def _show_credits(self):
-        """Vindue med licens, kildekodetilbud (AGPL §6) og bibliotekliste."""
-        import webbrowser
-        from . import credits
-
-        win = tk.Toplevel(self)
-        win.title(_("Credits"))
-        win.transient(self)
-        win.resizable(False, True)
-
-        win_w, win_h = 520, 480
-        x = self.winfo_x() + (self.winfo_width() - win_w) // 2
-        y = self.winfo_y() + (self.winfo_height() - win_h) // 2
-        win.geometry(f"{win_w}x{win_h}+{x}+{y}")
-
-        outer = ttk.Frame(win, padding=16)
-        outer.pack(fill="both", expand=True)
-
-        ttk.Label(outer, text="Unite Docs " + __version__,
-                  font=("Segoe UI", 12, "bold")).pack(anchor="w")
-        ttk.Label(outer, text="© 2025 Bo Sundgaard",
-                  font=("Segoe UI", 9)).pack(anchor="w", pady=(0, 8))
-
-        ttk.Label(outer, text=_("Licens: AGPL-3.0"),
-                  font=("Segoe UI", 9, "bold")).pack(anchor="w")
-
-        # AGPL §6 kildekodetilbud — det eneste ikke-valgfrie compliance-element.
-        src_link = ttk.Label(outer, text=_("Vis kildekode"),
-                             foreground=theme.C["link"], cursor="hand2",
-                             font=("Segoe UI", 9, "underline"))
-        src_link.bind("<Button-1>", lambda _e: webbrowser.open(credits.SOURCE_URL))
-        src_link.pack(anchor="w", pady=(0, 12))
-
-        ttk.Label(outer, text=_("Anvendte biblioteker"),
-                  font=("Segoe UI", 10, "bold")).pack(anchor="w", pady=(0, 4))
-
-        # Rulbar liste.
-        list_frame = ttk.Frame(outer)
-        list_frame.pack(fill="both", expand=True)
-        canvas = tk.Canvas(list_frame, highlightthickness=0)
-        scrollbar = ttk.Scrollbar(list_frame, orient="vertical", command=canvas.yview)
-        inner = ttk.Frame(canvas)
-        inner.bind("<Configure>", lambda _e: canvas.configure(scrollregion=canvas.bbox("all")))
-        canvas.create_window((0, 0), window=inner, anchor="nw")
-        canvas.configure(yscrollcommand=scrollbar.set)
-        canvas.pack(side="left", fill="both", expand=True)
-        scrollbar.pack(side="right", fill="y")
-
-        for lib in credits.CREDITS:
-            row = ttk.Frame(inner)
-            row.pack(fill="x", anchor="w", pady=2)
-            ver = (" " + lib.version) if lib.version else ""
-            ttk.Label(row, text=f"{lib.name}{ver}",
-                      font=("Segoe UI", 9, "bold")).pack(anchor="w")
-            ttk.Label(row, text=lib.license + "  —  " + lib.url,
-                      font=("Segoe UI", 8), foreground=theme.C["text_muted"]).pack(anchor="w")
-
-        ttk.Button(outer, text=_("OK"), command=win.destroy).pack(pady=(12, 0))
-
-        win.bind("<Escape>", lambda _e: win.destroy())
-        win.grab_set()
-
-    def _update_export_status(self, p_widgets, extension):
-        if not p_widgets['window'].winfo_exists():
-            return
-        p_widgets['label'].config(text=_("Konverterer til %s...") % extension)
-        p_widgets['window'].update_idletasks()
-
-    def _update_ocr_status(self, p_widgets):
-        if not p_widgets['window'].winfo_exists():
-            return
-        p_widgets['label'].config(text=_("Gør scannede sider søgbare (OCR)..."))
-        p_widgets['window'].update_idletasks()
-
-    def _update_save_progress(self, p_widgets, current, total):
-        if not p_widgets['window'].winfo_exists(): return
-        p_widgets['bar']['value'] = (current / total) * 100
-        p_widgets['label'].config(text=_("Behandler fil %s af %s...") % (current, total))
-        p_widgets['window'].update_idletasks()
-
-    def _update_export_progress(self, p_widgets, done, total):
-        """Per-side fremdrift under den (langsomme) tekstkonvertering, med ETA."""
-        if not p_widgets['window'].winfo_exists():
-            return
-        if p_widgets.get('_conv_start') is None:
-            p_widgets['_conv_start'] = time.time()
-        frac = (done / total) if total else 0
-        p_widgets['bar']['value'] = frac * 100
-        eta = ""
-        if 0 < done < total:
-            elapsed = time.time() - p_widgets['_conv_start']
-            remaining = elapsed / done * (total - done)
-            eta = " · " + (_("ca. %s tilbage") % self._fmt_secs(remaining))
-        p_widgets['label'].config(
-            text=(_("Konverterer side %(d)s af %(t)s") % {"d": done, "t": total}) + eta)
-        p_widgets['window'].update_idletasks()
-
-    def _destroy_progress(self, p_widgets):
-        try:
-            if p_widgets['window'].winfo_exists():
-                p_widgets['window'].grab_release()
-                p_widgets['window'].destroy()
-        except tk.TclError:
-            pass
-
-    def _merge_cancelled(self, out_path, p_widgets):
-        self._destroy_progress(p_widgets)
-        try:
-            if out_path and os.path.exists(out_path):
-                os.remove(out_path)
-        except OSError:
-            pass
-        messagebox.showinfo(_("Annulleret"), _("Eksporten blev annulleret."))
-
-    def _save_dec_cancelled(self, p_widgets):
-        self._destroy_progress(p_widgets)
-        messagebox.showinfo(_("Annulleret"), _("Eksporten blev annulleret."))
-
-    def _build_ui(self):
-        # Kommandobar: én flad række med STORE ikoner over forklarende tekst
-        # (compound="top"), adskilt af separatorer (ingen gruppe-overskrifter).
-        # Primære handlinger er accent-blå. Indstillinger skubbes helt til højre
-        # (Windows-konvention). En hårstreg under baren adskiller den fra indholdet.
-        self.toolbar = ttk.Frame(self)
-        self.toolbar.grid(row=0, column=0, sticky="ew")
-        bar = ttk.Frame(self.toolbar)
-        bar.pack(side="top", fill="x", padx=theme.SPACE["md"], pady=theme.SPACE["sm"])
-        theme.hairline(self.toolbar, "horizontal").pack(side="top", fill="x")
-        f = self.icon_factory
-        CMD = theme.ICON["cmdlg"]          # store kommandobar-ikoner
-
-        def sep():
-            ttk.Separator(bar, orient="vertical").pack(
-                side="left", fill="y", padx=theme.SPACE["sm"], pady=2)
-
-        def primary(icon, text, command):
-            b = ttk.Button(bar, text=text, style="Accent.TButton", compound="top",
-                           image=f.get(icon, CMD, theme.C["selection_fg"]), command=command)
-            b.pack(side="left", padx=1)
-            return b
-
-        def tool(icon, text, command, tip=None, shortcut=None):
-            """Ikon-over-tekst knap. Synlig tekst er den forklarende label; en
-            tooltip tilføjes kun når den bærer EKSTRA info (genvej/tilstand)."""
-            b = ttk.Button(bar, text=text, style="Toolbutton", compound="top",
-                           image=f.get(icon, CMD), command=command)
-            b._icon_name = icon
-            b._icon_size = CMD
-            b.pack(side="left", padx=1)
-            if tip is not None or shortcut is not None:
-                Tooltip.attach(b, tip if tip is not None else text, shortcut=shortcut)
-            return b
-
-        # --- Filer ---
-        primary('add', _("Tilføj filer"), self._add)
-        self._merge_btn = primary('save', _("Flet og gem"), self._merge)
-        tool('decrypt', _("Gem enkeltfiler"), self._save_dec)
-        sep()
-
-        # --- Roter / beskær ---
-        tool('rotate_left', _("Venstre"), self._rotate_left)
-        tool('rotate_right', _("Højre"), self._rotate_right)
-        self._crop_btn = ttk.Button(bar, text=_("Beskær"), style="Toolbutton",
-                                    compound="top", image=f.get('crop', CMD),
-                                    command=self._toggle_crop_tool)
-        self._crop_btn._icon_name = 'crop'
-        self._crop_btn._icon_size = CMD
-        self._crop_btn.pack(side="left", padx=1)
-        Tooltip.attach(self._crop_btn, _("Træk en ramme for at beskære den viste side"))
-        sep()
-
-        # --- Rækkefølge: kompakt 2x2 pil-klynge (ikon-only m. tooltip) + omvend + slet ---
-        order = ttk.Frame(bar)
-
-        def ob(icon, tip, cmd, r, c, **grid):
-            b = icons_vector.icon_button(order, icon=icon, tip=tip, command=cmd,
-                                         factory=f, size=theme.ICON["small"],
-                                         style="Compact.Toolbutton")
-            b.grid(row=r, column=c, **grid)
-        ob('up', _("Flyt op"), self._up, 0, 0, sticky="ew")
-        ob('down', _("Flyt ned"), self._down, 1, 0, sticky="ew")
-        ob('top', _("Flyt øverst"), self._move_top, 0, 1, sticky="ew", padx=(2, 0))
-        ob('bottom', _("Flyt nederst"), self._move_bottom, 1, 1, sticky="ew", padx=(2, 0))
-        order.pack(side="left", padx=(1, 4))
-        self._sort_btn = ttk.Button(bar, text=_("Sorter"), style="Toolbutton",
-                                    compound="top", image=f.get('sort', CMD),
-                                    command=self._toggle_sort_panel)
-        self._sort_btn._icon_name = 'sort'
-        self._sort_btn._icon_size = CMD
-        self._sort_btn.pack(side="left", padx=1)
-        Tooltip.attach(self._sort_btn, _("Sortér filerne"))
-        tool('insert_page', _("Indsæt side"), self._open_insert_page_dialog,
-             tip=_("Indsæt en ny side med overskrift og tekst"))
-        tool('delete', _("Slet"), self._delete_selection)
-        sep()
-
-        # --- Fortryd / gentag (ikon+tekst; ikon nedtones når disabled) ---
-        self._undo_btn = ttk.Button(
-            bar, style="Toolbutton", compound="top", state="disabled", command=self._do_undo,
-            text=_("Fortryd"), image=f.get('undo_preview', CMD, theme.C["text_disabled"]))
-        self._undo_btn._icon_name = 'undo_preview'
-        self._undo_btn._icon_size = CMD
-        Tooltip.attach(self._undo_btn, _("Fortryd"), shortcut="Ctrl+Z")
-        self._undo_btn.pack(side="left", padx=1)
-        self._redo_btn = ttk.Button(
-            bar, style="Toolbutton", compound="top", state="disabled", command=self._do_redo,
-            text=_("Gentag"), image=f.get('redo_preview', CMD, theme.C["text_disabled"]))
-        self._redo_btn._icon_name = 'redo_preview'
-        self._redo_btn._icon_size = CMD
-        Tooltip.attach(self._redo_btn, _("Gentag"), shortcut="Ctrl+Y")
-        self._redo_btn.pack(side="left", padx=1)
-        sep()
-
-        # --- Dialoger: kodeord (tooltip viser antallet) ---
-        tool('key', _("Kodeord"), self._open_passwords_dialog,
-             tip=lambda: _("Kodeord (%d gemt)") % len(self._pw_lines))
-
-        # --- Højrestillet: Indstillinger yderst, visnings-skiftet lige til
-        # venstre for den. Rækkefølgen er omvendt af det man ser: den FØRST
-        # pakkede side="right"-widget havner længst til højre.
-        settings_btn = ttk.Button(bar, text=_("Indstillinger"), style="Toolbutton",
-                                  compound="top", image=f.get('settings', CMD),
-                                  command=self._open_settings_window)
-        settings_btn.pack(side="right")
-
-        self.undo_stack.subscribe(self._update_undo_buttons)
-        self._update_undo_buttons()
-
-        # Sidegitteret er nu appens ENESTE dokumentvisning. Drop-highlight tegnes
-        # af page_view selv (canvas-baggrunden), saa der er ingen ramme-widget her.
-        self.columnconfigure(0, weight=1)
-        self.rowconfigure(1, weight=1)
-        self.page_view = PageView(self, self)
-        self.page_view.grid(row=1, column=0, sticky="nsew", padx=8, pady=6)
-
-        def _first_paint():
-            self.page_view.rebuild()
-            self.page_view.focus_page()      # tastaturnavigation klar med det samme
-
-        self.after(50, _first_paint)
-
-        # Bundpanelet (Adgangskoder) er flyttet til en dialog (nøgle-knappen i
-        # kommandobaren), så dokumentet får hele højden. Row 2 står bevidst tom.
-
-        self._build_status_bar()
-
-    # --- Status bar (Fase 2) ----------------------------------------------
-    def _build_status_bar(self):
-        """Nederste linje: venstre = kontekstuel status, højre = version + Credits.
-        Erstatter den gamle statiske versionsstribe."""
-        foot = ttk.Frame(self)
-        foot.grid(row=3, column=0, sticky="ew")
-        theme.hairline(foot, "horizontal").pack(side="top", fill="x")
-        sb = ttk.Frame(foot)
-        sb.pack(side="top", fill="x", padx=theme.SPACE["md"], pady=(2, 4))
-        sb.columnconfigure(0, weight=1)
-
-        self._status_var = tk.StringVar(value=self._default_status())
-        self._status_label = ttk.Label(sb, textvariable=self._status_var,
-                                       foreground=theme.C["text_muted"], anchor="w")
-        self._status_label.grid(row=0, column=0, sticky="w")
-
-        right = ttk.Frame(sb)
-        right.grid(row=0, column=1, sticky="e")
-        ttk.Label(right, text="v%s · 2025 · Bo Sundgaard" % __version__,
-                  foreground=theme.C["text_muted"], font=theme.FONTS["small"]).pack(side="left")
-
-        def _dot():
-            # Separator som egen dæmpet label -> understregningen dækker KUN
-            # linkteksten, og de to links løber ikke sammen.
-            ttk.Label(right, text="  ·  ", foreground=theme.C["text_muted"],
-                      font=theme.FONTS["small"]).pack(side="left")
-
-        def _link(text, command):
-            lbl = ttk.Label(right, text=text, foreground=theme.C["link"],
-                            cursor="hand2", font=theme.FONTS["link"])
-            lbl.bind("<Button-1>", lambda _e: command())
-            lbl.pack(side="left")
-
-        _dot()
-        _link("www.uniteapps.dk", self._open_website)
-        _dot()
-        _link(_("Credits"), self._show_credits)
-
-    def _open_website(self):
-        import webbrowser
-        try:
-            webbrowser.open("https://www.uniteapps.dk")
-        except Exception as e:
-            logger.warning("Kunne ikke åbne hjemmesiden: %s", e)
-
+    # ------------------------------------------------------------------
+    # Statuslinje
+    # ------------------------------------------------------------------
     def _default_status(self) -> str:
         """Tomgangs-teksten: antal filer/sider (+ evt. antal valgte)."""
         files = self.model.files
@@ -1260,433 +836,103 @@ class PDFTool(tk.Tk):
             else:
                 pages += fentry.source_page_count
         text = _("%(n)d filer · %(p)d sider") % {"n": n, "p": pages}
-        try:
-            sel = len(self.page_view.selected_uids()) if self.page_view else 0
-        except (AttributeError, tk.TclError):
-            sel = 0
+        sel = len(self.page_view.selected_uids()) if self.page_view else 0
         if sel:
             text += _("  ·  %(s)d valgt") % {"s": sel}
         return text
 
-    def set_status(self, text: str = "", *, transient_ms: int | None = None, kind: str = "info"):
-        """Skriv en statusbesked (main thread only — workere går via self._queue).
+    def set_status(self, text: str = "", *, transient_ms: int | None = None,
+                   kind: str = "info") -> None:
+        """Skriv en statusbesked (kun UI-traaden -- workere gaar via ``_queue``).
 
         Tom ``text`` viser tomgangs-teksten. ``transient_ms`` nulstiller til
-        tomgang efter et stykke tid. ``kind`` styrer farven.
-        """
+        tomgang efter et stykke tid. ``kind`` styrer farven."""
         label = getattr(self, "_status_label", None)
         if label is None:
             return
-        if self._status_after is not None:
-            try:
-                self.after_cancel(self._status_after)
-            except (tk.TclError, ValueError):
-                pass
-            self._status_after = None
-        colors = {"info": theme.C["text_muted"], "success": theme.C["success"],
-                  "warning": theme.C["warning"], "error": theme.C["danger"]}
-        msg = text if text else self._default_status()
-        try:
-            self._status_var.set(msg)
-            label.configure(foreground=colors.get(kind, theme.C["text_muted"]))
-        except tk.TclError:
-            return
+        self._status_timer.stop()
+        names = {"info": "Muted", "success": "Success", "warning": "Warning",
+                 "error": "Danger"}
+        label.setText(text if text else self._default_status())
+        label.setObjectName(names.get(kind, "Muted"))
+        label.style().unpolish(label)
+        label.style().polish(label)
         if transient_ms:
-            self._status_after = self.after(transient_ms, self._refresh_status)
+            self._status_timer.start(transient_ms)
 
-    def _refresh_status(self):
-        """Vis tomgangs-teksten igen (og annullér en evt. forbigående besked)."""
+    def _refresh_status(self) -> None:
         self.set_status()
 
-    def _process_queue(self):
-        try:
-            while True:
-                fn, args = self._queue.get_nowait()
-                try:
-                    fn(*args)
-                except Exception as e:
-                    logger.error("Error processing queue item: %s", e)
-                    import traceback
-                    traceback.print_exc()
-        except queue.Empty:
-            pass
-        self.after(50, self._process_queue)
-    
-    def _pwlist(self) -> list[str]:
-        return list(dict.fromkeys(l.strip() for l in self._pw_lines if l.strip()))
-    
+    # ------------------------------------------------------------------
+    # Model og metadata
+    # ------------------------------------------------------------------
     @property
     def paths(self) -> dict:
-        """Read-only iid→path map derived from the model. Kept as a property so
-        existing readers (password workers,
-        merge) keep working while the model is the real source of truth. Writers
-        must go through the model, not this dict.
+        """Read-only iid->sti-map udledt af modellen.
 
-        Read from worker threads (thumbnail existence checks), so iterate an atomic
-        list() snapshot — a bare comprehension over self.model.files could raise
-        "list changed size during iteration" while the main thread adds files."""
+        Laeses fra worker-traade, saa der itereres over et atomisk ``list()``-
+        snapshot -- en bar comprehension over ``self.model.files`` kunne rejse
+        "list changed size during iteration" mens UI-traaden tilfoejer filer."""
         return {f.iid: f.path for f in list(self.model.files)}
 
     def _add_file_entry(self, path, index="end"):
-        """Læg en fil i modellen som PLADSHOLDER med det samme (ingen disk-I/O på
-        hovedtråden). Returnerer den nye FileEntry, eller None hvis filen allerede
-        er tilføjet. Metadata (sidetal, krypteringsstatus, dato, størrelse) læses
-        asynkront bagefter via _load_metadata_async — det er dét der holder UI'et
-        flydende når mange (eller krypterede) filer tilføjes på én gang."""
+        """Laeg en fil i modellen som PLADSHOLDER med det samme (ingen disk-I/O
+        paa UI-traaden). Metadata laeses asynkront bagefter."""
         if path in self.paths.values():
             return None
         entry = em.FileEntry(
-            iid=uuid.uuid4().hex,
-            path=path,
-            kind=em.kind_for_path(path),
-            enc_key=pdf_utils.ENC_UNKNOWN,       # placeholder until metadata loads
-            creation_date="",
-            source_page_count=0,
-        )
+            iid=uuid.uuid4().hex, path=path, kind=em.kind_for_path(path),
+            enc_key=pdf_utils.ENC_UNKNOWN, creation_date="", source_page_count=0)
         self.model.add_file(entry, None if index == "end" else index)
         return entry
 
-    def _load_metadata_async(self, entries):
-        """Read metadata for freshly-added files off the main thread and update
-        their rows via the queue. One worker per batch; opens are serialized
-        under PDF_LOCK (encrypted files try every password — that is exactly the
-        slow work that used to freeze the UI)."""
+    def _load_metadata_async(self, entries) -> None:
+        """Laes metadata for friskt tilfoejede filer uden for UI-traaden. Én
+        worker pr. batch; aabninger serialiseres under ``PDF_LOCK``."""
         entries = [e for e in entries if e is not None]
         if not entries:
             return
-        pw_list = self._get_all_passwords()
-        snapshot = [(e.iid, e.path) for e in entries]
-        threading.Thread(target=self._metadata_worker, args=(snapshot, pw_list),
-                         daemon=True).start()
+        qt_util.run_in_thread(self._metadata_worker,
+                              [(e.iid, e.path) for e in entries],
+                              self._get_all_passwords(), name="metadata")
 
-    def _metadata_worker(self, snapshot, pw_list):
+    def _metadata_worker(self, snapshot, pw_list) -> None:
         for iid, path in snapshot:
             with pdf_renderer.PDF_LOCK:
                 meta = pdf_utils.get_pdf_metadata(path, pw_list)
             self._queue.put((self._apply_file_metadata, (iid, meta)))
 
-    def _apply_file_metadata(self, iid, meta):
+    def _apply_file_metadata(self, iid, meta) -> None:
         entry = self.model.entry_by_iid(iid)
         if entry is None:
             return
         entry.enc_key = meta["enc_status"]
         entry.creation_date = meta["creation_date"]
-        entry.size_bytes = int(meta.get("size_bytes") or 0)   # sorteringsnøgle
+        entry.size_bytes = int(meta.get("size_bytes") or 0)     # sorteringsnoegle
         if not entry.pages_loaded:
             entry.source_page_count = int(meta["page_count"]) if meta["page_count"] else 0
         if self.page_view is not None:
-            # Hovedet viser navn/dato/hængelås — alle tre kan lige have ændret sig.
+            # Hovedet viser navn/dato/haengelaas -- alle tre kan lige have aendret sig.
             self.page_view.refresh_header(iid)
-            # Filen kan nu være læsbar og klar til at få sine sider populeret.
             self._schedule_page_view_refresh()
-        # On-add prompt: en netop tilføjet, stadig-krypteret fil beder om kodeord.
-        # Kun for filer der er markeret ved tilføjelse (ikke ved _refresh_all efter
-        # gæt/tjek), så der ikke opstår en prompt-storm.
+        # On-add prompt: en netop tilfoejet, stadig-krypteret fil beder om kodeord.
         if iid in self._prompt_on_metadata:
             if entry.enc_key == pdf_utils.ENC_ENCRYPTED:
                 self._queue_unlock_prompt(iid)
             else:
                 self._prompt_on_metadata.discard(iid)
-        # Sidetal kan nu være kendt -> opdatér statuslinjen (respekterer en aktiv
-        # forbigående besked ved ikke at overskrive den med det samme).
-        if self._status_after is None:
+        if not self._status_timer.isActive():
             self._refresh_status()
 
-    def _schedule_page_view_refresh(self):
-        """Debounce many metadata callbacks into a single page-view rebuild."""
-        if getattr(self, "_pv_refresh_after", None):
-            return
-        self._pv_refresh_after = self.after(150, self._do_page_view_refresh)
+    def _schedule_page_view_refresh(self) -> None:
+        self._pv_refresh_timer.start(150)
 
-    def _do_page_view_refresh(self):
-        self._pv_refresh_after = None
-        if self.page_view is not None:
-            self._ensure_pages_then_rebuild()
-
-    def _update_undo_buttons(self):
-        # ttk nedtoner ikke image= sammen med state="disabled" (billedet er ikke
-        # en del af stilen), så ikonet males eksplicit i den rette tone.
-        try:
-            icons_vector.set_button_state(
-                self._undo_btn, self.icon_factory,
-                state="normal" if self.undo_stack.can_undo else "disabled", size=theme.ICON["cmd"])
-            icons_vector.set_button_state(
-                self._redo_btn, self.icon_factory,
-                state="normal" if self.undo_stack.can_redo else "disabled", size=theme.ICON["cmd"])
-        except (AttributeError, tk.TclError):
-            pass
-
-    def _do_undo(self, event=None):
-        # Let Text widgets (kodeord / fritekst-felter) keep their own undo.
-        if isinstance(self.focus_get(), tk.Text):
-            return
-        if not self.undo_stack.can_undo:
-            return "break"
-        self.undo_stack.undo()
-        self._after_history_change()
-        return "break"
-
-    def _do_redo(self, event=None):
-        if isinstance(self.focus_get(), tk.Text):
-            return
-        if not self.undo_stack.can_redo:
-            return "break"
-        self.undo_stack.redo()
-        self._after_history_change()
-        return "break"
-
-    def _after_history_change(self):
-        """Re-derive the views from the model after an undo/redo mutated it
-        behind the UI's back."""
-        if self.page_view is not None:
-            self.page_view.rebuild()
-        self._refresh_status()
-
-    def after_model_change(self):
-        """Genudled visningen efter en model-mutation. Eneste indgang for
-        page_view, saa den ikke selv skal vide hvad der ellers lytter med."""
-        self._refresh_status()
-
-    def after_crop_change(self, uid=None):
-        """En beskaering aendrede sidens maal: genopbyg gitteret, saa flisen
-        gen-renderes (crop indgaar i render-cachens noegle)."""
-        if self.page_view is not None:
-            self.page_view.rebuild()
-        self._refresh_status()
-
-    def unlock_file(self, iid: str):
-        """Bed om kodeord til een fil (fil-kontekstmenuen i sidevisningen)."""
-        if self._prompt_password_for(iid):
-            self._ensure_pages_then_rebuild()
-
-    def delete_file(self, iid: str):
-        """Slet en HEL fil (markeret filhoved i sidevisningen)."""
-        if self.model.entry_by_iid(iid) is not None:
-            self._remove([iid])
-
-    def _count_redactions(self, entries):
-        n = 0
-        for f in entries:
-            for pg in getattr(f, 'pages', []):
-                for a in pg.annots:
-                    if a.kind == annotations.ANNOT_REDACT:
-                        n += 1
-        return n
-
-    def _confirm_redactions(self, entries):
-        """Redaction is irreversible in the output (apply_redactions rewrites the
-        content stream). Warn before any save that would bake redactions in."""
-        n = self._count_redactions(entries)
-        if n == 0:
-            return True
-        return messagebox.askyesno(
-            _("Bekræft maskering"),
-            _("Dokumentet indeholder %s maskering(er), som fjerner indhold "
-              "permanent i den gemte fil og ikke kan fortrydes i outputtet. "
-              "Vil du fortsætte?") % n,
-            icon="warning")
-
-    # --- Per-page export (Fase 10) ---------------------------------------
-    def export_single_page(self, page_uid, fmt):
-        """Export ONE page to its own file. fmt in {pdf, md, epub, jpg, png}.
-        JPG/PNG are deliberately kept OUT of export_formats.FORMAT_ORDER (they are
-        meaningless in the merge dialog); they render the finished page to a raster.
-        """
-        found = self.model.page_by_uid(page_uid)
-        if not found:
-            return
-        entry, page = found
-        # En indsat side har sin egen (ukrypterede) kildefil — låse-tjekket
-        # gælder kun sider der faktisk kommer fra entry.path.
-        own = os.path.normcase(page.src_path) == os.path.normcase(entry.path)
-        if (own and entry.kind == em.KIND_PDF
-                and entry.enc_key not in (pdf_utils.ENC_DECRYPTED, pdf_utils.ENC_NOT_ENCRYPTED)):
-            messagebox.showinfo(_("Eksport"), _("Siden kan ikke eksporteres (låst fil)."))
-            return
-        ext = {"pdf": ".pdf", "md": ".md", "epub": ".epub",
-               "jpg": ".jpg", "png": ".png"}.get(fmt)
-        if not ext:
-            return
-        # Redaction is irreversible in the output — confirm if this page has any.
-        if any(a.kind == annotations.ANNOT_REDACT for a in page.annots):
-            if not self._confirm_redactions([entry]):
-                return
-        stem = Path(page.src_path).stem
-        out_path = filedialog.asksaveasfilename(
-            defaultextension=ext,
-            initialfile="%s_side%d%s" % (stem, page.src_index + 1, ext),
-            filetypes=[(fmt.upper(), "*" + ext)])
-        if not out_path:
-            return
-        pdf_renderer.clear_doc_cache()
-        pw = self._get_all_passwords()
-        job = save_pipeline.FileJob(
-            path=page.src_path,
-            kind=entry.kind if own else em.kind_for_path(page.src_path),
-            enc_key=entry.enc_key if own else pdf_utils.ENC_NOT_ENCRYPTED,
-            pages=[save_pipeline.PageJob(src_index=page.src_index,
-                                         rotation=page.rotation, annots=page.annots)],
-            title=stem)
-        p_widgets = self._show_progress_dialog(
-            _("Eksporterer…"), _("Eksporterer side til %s…") % fmt.upper(),
-            cancellable=True)
-        self._export_busy = p_widgets
-        threading.Thread(target=self._export_page_worker,
-                         args=(out_path, job, pw, fmt, stem, p_widgets), daemon=True).start()
-
-    def _export_page_worker(self, out_path, job, pw, fmt, stem, p_widgets):
-        ev = p_widgets.get("cancel")
-        def cancel():
-            return ev is not None and ev.is_set()
-        def export_progress(done, total):
-            self._queue.put((self._update_export_progress, (p_widgets, done, total)))
-        try:
-            if fmt in ("pdf", "jpg", "png"):
-                merged, ok, fail, chapters = save_pipeline.build_document(
-                    [job], pw, is_pdf=True,
-                    apply_annots=annotations.apply_specs_to_page)
-                try:
-                    if ok == 0:
-                        raise RuntimeError(_("Siden kunne ikke behandles."))
-                    if fmt == "pdf":
-                        merged.save(out_path, garbage=3, deflate=True)
-                    else:
-                        pix = merged[0].get_pixmap(dpi=200)
-                        pix.save(out_path)
-                finally:
-                    merged.close()
-            else:
-                fmt_const = (export_formats.FORMAT_MD if fmt == "md"
-                             else export_formats.FORMAT_EPUB)
-                merged, ok, fail, chapters = save_pipeline.build_document(
-                    [job], pw, is_pdf=False,
-                    apply_annots=annotations.apply_specs_to_page)
-                try:
-                    if ok == 0:
-                        raise RuntimeError(_("Siden kunne ikke behandles."))
-                    export_formats.write_document(
-                        fmt_const, doc=merged, out_path=out_path,
-                        chapters=chapters, title=stem,
-                        progress=export_progress, cancel=cancel)
-                finally:
-                    merged.close()
-            self._queue.put((self._export_page_done, (out_path,)))
-        except export_formats.ExportCancelled:
-            self._queue.put((self._export_page_cancelled, (out_path,)))
-        except Exception as e:
-            logger.error("Per-side eksport fejlede: %s", e)
-            self._queue.put((self._export_page_failed, (str(e),)))
-
-    def _export_page_done(self, out_path):
-        self._destroy_progress(getattr(self, "_export_busy", None) or {})
-        self._export_busy = None
-        messagebox.showinfo(_("Eksport"), _("Siden er eksporteret til:\n%s") % out_path)
-
-    def _export_page_failed(self, msg):
-        self._destroy_progress(getattr(self, "_export_busy", None) or {})
-        self._export_busy = None
-        messagebox.showerror(_("Eksport fejlede"), msg)
-
-    def _export_page_cancelled(self, out_path):
-        self._destroy_progress(getattr(self, "_export_busy", None) or {})
-        self._export_busy = None
-        try:
-            if out_path and os.path.exists(out_path):
-                os.remove(out_path)
-        except OSError:
-            pass
-        messagebox.showinfo(_("Annulleret"), _("Eksporten blev annulleret."))
-
-    def _add_paths(self, paths):
-        added = [self._add_file_entry(p) for p in paths]
-        self._mark_for_unlock_prompt(added)
-        self._load_metadata_async(added)
-        self._after_files_added()
-
-    def _mark_for_unlock_prompt(self, entries):
-        """Husk hvilke friskt tilføjede filer der skal prompte for kodeord, når
-        deres metadata (og dermed enc-status) lander."""
-        for e in entries:
-            if e is not None:
-                self._prompt_on_metadata.add(e.iid)
-
-    def _add(self):
-        filetypes = [(_("Understøttede filer"), "*.pdf *.jpg *.jpeg *.png *.bmp *.tiff *.tif"), (_("PDF-filer"), "*.pdf")]
-        filetypes.append((_("Billedfiler"), "*.jpg *.jpeg *.png *.bmp *.tiff *.tif"))
-        paths_to_add = filedialog.askopenfilenames(filetypes=filetypes)
-        if not paths_to_add: return
-        self._add_paths(paths_to_add)
-
-    _SUPPORTED_DROP_EXTENSIONS = {'.pdf', '.jpg', '.jpeg', '.png', '.bmp', '.tiff', '.tif'}
-
-    def _on_external_drop(self, event):
-        self._clear_drop_highlight()
-        if not event.data:
-            return event.action
-        paths = self.tk.splitlist(event.data)
-        # Insert at the drop position over the file tree (not always at the end).
-        insert_index = self._drop_index_from_event(event)
-        added = []
-        for p in paths:
-            if not os.path.exists(p):
-                continue
-            if Path(p).suffix.lower() not in self._SUPPORTED_DROP_EXTENSIONS:
-                continue
-            entry = self._add_file_entry(p, index=insert_index)
-            if entry is not None:
-                added.append(entry)
-                if insert_index != "end":
-                    insert_index += 1     # keep dropped files in order after target
-        self._mark_for_unlock_prompt(added)
-        self._load_metadata_async(added)
-        self._after_files_added()
-        return event.action
-
-    def _drop_index_from_event(self, event):
-        """Hvilket FIL-indeks et Explorer-drop skal indsaettes paa.
-
-        Tidligere blev der hit-testet mod en traeraekke, og alt uden for en raekke
-        gav "end" -- derfor landede ethvert drop i SIDEVISNINGEN altid nederst.
-        Nu hit-testes der mod sidegitteret."""
+    def _ensure_pages_then_rebuild(self) -> None:
+        """Opret sider for enhver laesbar, endnu ikke populeret PDF (i en worker
+        under ``PDF_LOCK``) og genopbyg derefter gitteret. Billeder populeres med
+        det samme (1 side, ingen I/O)."""
         if self.page_view is None:
-            return "end"
-        try:
-            idx = self.page_view.drop_file_index(event.x_root, event.y_root)
-        except (AttributeError, tk.TclError):
-            return "end"
-        return "end" if idx is None else idx
-
-    def _on_drop_enter(self, event):
-        self._set_drop_highlight(True)
-        self.set_status(_("Slip for at tilføje filer"))
-        return event.action
-
-    def _on_drop_leave(self, event):
-        self._clear_drop_highlight()
-        self._refresh_status()
-        return event.action
-
-    def _set_drop_highlight(self, on: bool):
-        """Markér drop-maalet. Sidegitteret tegner selv sin baggrund om i
-        _dnd_enter/_dnd_leave, saa her er der kun statuslinjen tilbage."""
-        if on:
-            self.set_status(_("Slip for at tilføje filerne"))
-        else:
-            self._refresh_status()
-
-    def _clear_drop_highlight(self):
-        self._set_drop_highlight(False)
-        if self.page_view is not None:
-            try:
-                self.page_view.canvas.configure(background=theme.C["bg"])
-            except tk.TclError:
-                pass
-
-    # --- View toggle (file view <-> page view, Fase 3) --------------------
-    def _ensure_pages_then_rebuild(self):
-        """Opret sider for enhver læsbar, endnu ikke populeret PDF (i en worker
-        under PDF_LOCK) og genopbyg derefter gitteret. Billeder populeres med det
-        samme (1 side, ingen I/O)."""
+            return
         for f in self.model.files:
             if f.kind == em.KIND_IMAGE and not f.pages_loaded:
                 self.model.populate_image(f)
@@ -1696,12 +942,11 @@ class PDFTool(tk.Tk):
         if not to_load:
             self.page_view.rebuild()
             return
-        pw_list = self._get_all_passwords()
-        snapshot = [(f, f.path) for f in to_load]
-        threading.Thread(target=self._populate_pages_worker,
-                         args=(snapshot, pw_list), daemon=True).start()
+        qt_util.run_in_thread(self._populate_pages_worker,
+                              [(f, f.path) for f in to_load],
+                              self._get_all_passwords(), name="populate-pages")
 
-    def _populate_pages_worker(self, snapshot, pw_list):
+    def _populate_pages_worker(self, snapshot, pw_list) -> None:
         counts = []
         for f, path in snapshot:
             n = 0
@@ -1715,40 +960,195 @@ class PDFTool(tk.Tk):
             counts.append((f, n))
         self._queue.put((self._populate_pages_done, (counts,)))
 
-    def _populate_pages_done(self, counts):
+    def _populate_pages_done(self, counts) -> None:
         for f, n in counts:
-            # Spring over hvis filen ER populeret: et sent worker-callback må
-            # aldrig overskrive sidelisten, for så ville en undo af en flytning
-            # eller udtrækning blive tromlet ned bagfra.
+            # Spring over hvis filen ER populeret: et sent worker-callback maa
+            # aldrig overskrive sidelisten, for saa ville en undo af en flytning
+            # eller udtraekning blive tromlet ned bagfra.
             if n > 0 and not f.pages_loaded:
                 self.model.populate_pages(f, n)
         if self.page_view is not None:
             self.page_view.rebuild()
+        self._refresh_status()
+        self._maybe_anonymize_new_files()
 
-    def _after_files_added(self):
-        """Populér og genopbyg gitteret efter at filer er tilføjet."""
+    def _refresh_all(self) -> None:
+        """Genlaes metadata for hver fil off-thread. Kaldes efter
+        kodeordstjek/-gaet, hvor status kan have aendret sig."""
+        snapshot = [(f.iid, f.path) for f in self.model.files]
+        if snapshot:
+            qt_util.run_in_thread(self._metadata_worker, snapshot,
+                                  self._get_all_passwords(), name="metadata-refresh")
+
+    # -- hooks som sidevisningen kalder ---------------------------------
+    def after_model_change(self) -> None:
+        self._refresh_status()
+
+    def after_crop_change(self, uid=None) -> None:
+        """En beskaering aendrede sidens maal: genopbyg gitteret, saa flisen
+        gen-renderes (crop indgaar i render-cachens noegle)."""
+        if self.page_view is not None:
+            self.page_view.rebuild()
+        self._refresh_status()
+
+    def _after_history_change(self) -> None:
+        if self.page_view is not None:
+            self.page_view.rebuild()
+        self._refresh_status()
+
+    def _update_undo_buttons(self) -> None:
+        # Qt nedtoner selv ikonet (``QIcon.Disabled`` er lagt ind i
+        # ``icons_vector.qicon``), saa her skal kun enabled-flaget saettes.
+        self._undo_btn.setEnabled(self.undo_stack.can_undo)
+        self._redo_btn.setEnabled(self.undo_stack.can_redo)
+        self._history_btn.setEnabled(self.undo_stack.can_undo
+                                     or self.undo_stack.can_redo)
+
+    # ------------------------------------------------------------------
+    # Fortryd-historik
+    # ------------------------------------------------------------------
+    def _toggle_history(self) -> None:
+        if self._history_panel is not None:
+            self._history_panel.close()
+            return
+        if not (self.undo_stack.can_undo or self.undo_stack.can_redo):
+            self.set_status(_("Der er ingen historik endnu."), transient_ms=4000)
+            return
+        panel = dialogs.HistoryPanel(self, self.undo_stack.undo_labels(),
+                                     self.undo_stack.redo_labels())
+        panel.seek.connect(self._seek_history)
+        panel.destroyed.connect(lambda: setattr(self, "_history_panel", None))
+        self._history_panel = panel
+        panel.popup_under(self._history_btn)
+
+    def _seek_history(self, applied: int) -> None:
+        """Spring til den tilstand hvor praecis ``applied`` kommandoer er kørt."""
+        delta = int(applied) - len(self.undo_stack.undo_labels())
+        if delta == 0:
+            return
+        n = (self.undo_stack.redo_many(delta) if delta > 0
+             else self.undo_stack.undo_many(-delta))
+        if n:
+            self._after_history_change()
+            self.set_status(
+                _("%(n)d trin fortrudt") % {"n": n} if delta < 0
+                else _("%(n)d trin gentaget") % {"n": n}, transient_ms=4000)
+
+    def _do_undo(self) -> None:
+        if self.undo_stack.can_undo:
+            self.undo_stack.undo()
+            self._after_history_change()
+
+    def _do_redo(self) -> None:
+        if self.undo_stack.can_redo:
+            self.undo_stack.redo()
+            self._after_history_change()
+
+    def unlock_file(self, iid: str) -> None:
+        """Bed om kodeord til én fil (fil-kontekstmenuen i sidevisningen)."""
+        if self._prompt_password_for(iid):
+            self._ensure_pages_then_rebuild()
+
+    def delete_file(self, iid: str) -> None:
+        """Slet en HEL fil (markeret filhoved i sidevisningen)."""
+        if self.model.entry_by_iid(iid) is not None:
+            self._remove([iid])
+
+    # ------------------------------------------------------------------
+    # Tilføj filer, træk-og-slip
+    # ------------------------------------------------------------------
+    def _add(self) -> None:
+        filters = ";;".join([
+            qt_util.name_filter(_("Understøttede filer"),
+                                "*.pdf *.jpg *.jpeg *.png *.bmp *.tiff *.tif"),
+            qt_util.name_filter(_("PDF-filer"), "*.pdf"),
+            qt_util.name_filter(_("Billedfiler"),
+                                "*.jpg *.jpeg *.png *.bmp *.tiff *.tif"),
+        ])
+        paths, _sel = QFileDialog.getOpenFileNames(self, _("Tilføj filer"), "", filters)
+        if paths:
+            self._add_paths(paths)
+
+    def _add_paths(self, paths) -> None:
+        added = [self._add_file_entry(p) for p in paths]
+        self._mark_for_unlock_prompt(added)
+        self._load_metadata_async(added)
+        self._after_files_added()
+
+    def _mark_for_unlock_prompt(self, entries) -> None:
+        """Husk hvilke friskt tilfoejede filer der skal prompte for kodeord, naar
+        deres metadata (og dermed enc-status) lander."""
+        for e in entries:
+            if e is not None:
+                self._prompt_on_metadata.add(e.iid)
+
+    def _after_files_added(self) -> None:
         if self.page_view is not None:
             self._ensure_pages_then_rebuild()
         self._refresh_status()
 
-    def _register_dnd(self, widget, on_enter=None, on_leave=None):
-        """Register a widget as an Explorer drop target reusing the shared handlers.
-        Used by the file tree and (Fase 3) the page view's tile canvas."""
-        if not _tkdnd_support:
-            return
-        try:
-            widget.drop_target_register(_DND_FILES)
-            widget.dnd_bind('<<Drop>>', self._on_external_drop)
-            widget.dnd_bind('<<DropEnter>>', on_enter or self._on_drop_enter)
-            widget.dnd_bind('<<DropLeave>>', on_leave or self._on_drop_leave)
-        except Exception as e:
-            logger.warning("tkdnd registration failed: %s", e)
+    # -- native Qt drag & drop (afloeser tkinterdnd2) --------------------
+    @staticmethod
+    def _dropped_paths(mime) -> list[str]:
+        out = []
+        for url in mime.urls():
+            p = url.toLocalFile()
+            if p and os.path.exists(p) and Path(p).suffix.lower() in _SUPPORTED_DROP_EXTENSIONS:
+                out.append(p)
+        return out
 
-    def _remove(self, iids_to_remove: list[str] | None = None):
+    def dragEnterEvent(self, event):  # noqa: N802 - Qt-API
+        if event.mimeData().hasUrls() and self._dropped_paths(event.mimeData()):
+            event.acceptProposedAction()
+            self.set_status(_("Slip for at tilføje filerne"))
+            if self.page_view is not None:
+                self.page_view.set_drop_highlight(True)
+        else:
+            event.ignore()
+
+    def dragMoveEvent(self, event):  # noqa: N802 - Qt-API
+        if event.mimeData().hasUrls():
+            event.acceptProposedAction()
+
+    def dragLeaveEvent(self, event):  # noqa: N802 - Qt-API
+        if self.page_view is not None:
+            self.page_view.set_drop_highlight(False)
+        self._refresh_status()
+        event.accept()
+
+    def dropEvent(self, event):  # noqa: N802 - Qt-API
+        if self.page_view is not None:
+            self.page_view.set_drop_highlight(False)
+        paths = self._dropped_paths(event.mimeData())
+        if not paths:
+            event.ignore()
+            return
+        # Indsaet paa drop-positionen over sidegitteret, ikke altid til sidst.
+        insert_index = "end"
+        if self.page_view is not None:
+            idx = self.page_view.drop_file_index(event.globalPosition().toPoint())
+            if idx is not None:
+                insert_index = idx
+        added = []
+        for p in paths:
+            entry = self._add_file_entry(p, index=insert_index)
+            if entry is not None:
+                added.append(entry)
+                if insert_index != "end":
+                    insert_index += 1     # hold slupne filer i raekkefoelge
+        self._mark_for_unlock_prompt(added)
+        self._load_metadata_async(added)
+        self._after_files_added()
+        event.acceptProposedAction()
+
+    # ------------------------------------------------------------------
+    # Rækkefølge og redigering
+    # ------------------------------------------------------------------
+    def _remove(self, iids_to_remove: list[str] | None = None) -> None:
         """Fjern hele filer fra modellen (kildefilerne paa disken roeres ikke)."""
         if iids_to_remove is None:
-            iids_to_remove = [self.page_view._selected_file] if (
-                self.page_view and self.page_view._selected_file) else []
+            sel = self.page_view.selected_file() if self.page_view else None
+            iids_to_remove = [sel] if sel else []
         iids = [i for i in iids_to_remove if self.model.entry_by_iid(i) is not None]
         if not iids:
             return
@@ -1767,27 +1167,26 @@ class PDFTool(tk.Tk):
             self.page_view.rebuild()
         self._refresh_status()
 
-    def _delete_selection(self, event=None):
+    def _delete_selection(self) -> None:
         """Kommandobarens Slet: sider hvis sider er markeret, ellers hele filen."""
         if self.page_view is None:
-            return "break"
+            return
         sel = self.page_view.selected_uids()
         if sel:
             self.page_view.delete_pages(sel)
-        elif self.page_view._selected_file:
-            self._remove([self.page_view._selected_file])
-        return "break"
+        elif self.page_view.selected_file():
+            self._remove([self.page_view.selected_file()])
 
-    def _rotate_left(self):
+    def _rotate_left(self) -> None:
         if self.page_view is not None:
             self.page_view.rotate_selected(-90)
 
-    def _rotate_right(self):
+    def _rotate_right(self) -> None:
         if self.page_view is not None:
             self.page_view.rotate_selected(90)
-    
-    def _nudge(self, direction: int):
-        """Pil op/ned. Sider flyttes een plads; ved filens kant vandrer de over i
+
+    def _nudge(self, direction: int) -> None:
+        """Pil op/ned. Sider flyttes én plads; ved filens kant vandrer de over i
         nabofilen, og findes der ingen, bliver de deres egen fil. Er en HEL fil
         markeret, flyttes filen (med sine klaebende boern) i stedet."""
         if self.page_view is None:
@@ -1798,43 +1197,42 @@ class PDFTool(tk.Tk):
             if cmd is None:
                 return
             self.undo_stack.push(cmd)
-        elif self.page_view._selected_file:
-            self.undo_stack.push(
-                em.move_files_cmd(self.model, [self.page_view._selected_file], direction))
+        elif self.page_view.selected_file():
+            self.undo_stack.push(em.move_files_cmd(
+                self.model, [self.page_view.selected_file()], direction))
         else:
             return
         self.page_view.rebuild()
         self.page_view.reselect(sel)
 
-    def _up(self):
+    def _up(self) -> None:
         self._nudge(-1)
 
-    def _down(self):
+    def _down(self) -> None:
         self._nudge(1)
 
-    def _move_edge(self, to_end: bool):
+    def _move_edge(self, to_end: bool) -> None:
         """Flyt markeringen helt til dokumentets start/slut.
 
         Sider rives UD som deres egen fil forrest/bagerst -- ikke ind i den
         foerste/sidste eksisterende fil. "Flyt oeverst" paa en side midt i et
         dokument skal give en selvstaendig side foran alt andet; smed man den i
         stedet ind i nabofilen, blandede den sig med et helt andet dokument.
-        En markeret FIL flytter derimod hele sin blok (med klaebende boern).
-        """
+        En markeret FIL flytter derimod hele sin blok (med klaebende boern)."""
         if self.page_view is None or not self.model.files:
             return
         sel = self.page_view.selected_uids()
         if sel:
             entry = self.model.page_by_uid(sel[0])[0]
             # Er filen allerede yderst og bestaar kun af markeringen, er der intet
-            # at gore -- ellers ville vi slette og genskabe en identisk fil.
+            # at goere -- ellers ville vi slette og genskabe en identisk fil.
             edge = self.model.files[-1 if to_end else 0]
             if entry is edge and len(entry.pages) == len(sel):
                 return
             self.undo_stack.push(em.extract_pages_cmd(
                 self.model, sel, at_index=len(self.model.files) if to_end else 0))
-        elif self.page_view._selected_file:
-            iid = self.page_view._selected_file
+        elif self.page_view.selected_file():
+            iid = self.page_view.selected_file()
             block = [iid] + [f.iid for f in self.model.files if f.origin_iid == iid]
             rest = [f.iid for f in self.model.files if f.iid not in set(block)]
             self.undo_stack.push(em.reorder_files_cmd(
@@ -1844,106 +1242,47 @@ class PDFTool(tk.Tk):
         self.page_view.rebuild()
         self.page_view.reselect(sel)
 
-    def _move_top(self):
+    def _move_top(self) -> None:
         self._move_edge(False)
 
-    def _move_bottom(self):
+    def _move_bottom(self) -> None:
         self._move_edge(True)
 
-    def _refresh_all(self):
-        """Genlaes metadata for hver fil off-thread (samme vej som ved tilfoejelse).
-        Kaldes efter kodeordstjek/-gaet, hvor status kan have aendret sig."""
-        snapshot = [(f.iid, f.path) for f in self.model.files]
-        if not snapshot:
-            return
-        pw_list = self._get_all_passwords()
-        threading.Thread(target=self._metadata_worker, args=(snapshot, pw_list),
-                         daemon=True).start()
+    def _toggle_crop_tool(self) -> None:
+        """Slaa beskaerings-vaerktoejet til i fremviseren."""
+        if self.page_view is not None:
+            self.page_view.activate_crop_tool()
 
-    # --- Sorter: et PERSISTENT panel, ikke en tk.Menu ---------------------
-    # En tk.Menu lukker sig selv ved foerste klik. Panelet her er et
-    # overrideredirect-Toplevel UDEN grab_set(), saa det bliver staaende indtil
-    # man trykker Sorter igen (eller Escape).
-    _SORT_ROWS = (
-        (em.SORT_REVERSE, "Omvendt"),
-        (em.SORT_DATE, "Oprettelsesdato"),
-        (em.SORT_NAME, "Navn"),
-        (em.SORT_SIZE, "Størrelse"),
-    )
+    def set_crop_active(self, active: bool) -> None:
+        """Sidevisningen melder tilbage naar beskaering slaas fra/til, saa
+        knappen i kommandobaren viser den faktiske tilstand."""
+        self._crop_btn.setChecked(bool(active))
 
-    def _toggle_sort_panel(self):
+    # ------------------------------------------------------------------
+    # Sortering
+    # ------------------------------------------------------------------
+    def _toggle_sort_panel(self) -> None:
         if self._sort_panel is not None:
             self._close_sort_panel()
             return
-        self._build_sort_panel()
-
-    def _close_sort_panel(self, event=None):
-        panel, self._sort_panel = self._sort_panel, None
-        if panel is not None:
-            try:
-                panel.destroy()
-            except tk.TclError:
-                pass
-        try:
-            self.unbind("<Configure>", self._sort_cfg_bind)
-        except (tk.TclError, AttributeError):
-            pass
-        self._sort_cfg_bind = None
-
-    def _build_sort_panel(self):
-        panel = tk.Toplevel(self)
-        panel.overrideredirect(True)
-        panel.transient(self)
-        # Et overrideredirect-vindue haever sig ikke selv over hovedvinduet.
-        panel.attributes("-topmost", True)
+        panel = dialogs.SortPanel(self, self._SORT_ROWS, self._sort_dir)
+        panel.chosen.connect(self._apply_sort)
+        panel.destroyed.connect(self._on_sort_panel_closed)
         self._sort_panel = panel
-        frame = tk.Frame(panel, background=theme.C["surface"],
-                         highlightthickness=1,
-                         highlightbackground=theme.C["border_strong"],
-                         highlightcolor=theme.C["border_strong"])
-        frame.pack(fill="both", expand=True)
-        f = self.icon_factory
-        for key, label in self._SORT_ROWS:
-            row = tk.Frame(frame, background=theme.C["surface"])
-            row.pack(fill="x")
-            arrow = ""
-            if key != em.SORT_REVERSE:
-                arrow = "▼" if self._sort_dir.get(key) else "▲"
-            lbl = tk.Label(row, text=_(label), anchor="w", padx=10, pady=5,
-                           background=theme.C["surface"], foreground=theme.C["text"],
-                           font=theme.FONTS["base"])
-            lbl.pack(side="left", fill="x", expand=True)
-            dirlbl = tk.Label(row, text=arrow, padx=8,
-                              background=theme.C["surface"],
-                              foreground=theme.C["text_muted"],
-                              font=theme.FONTS["small"])
-            dirlbl.pack(side="right")
-            for w in (row, lbl, dirlbl):
-                w.bind("<Button-1>", lambda e, k=key: self._apply_sort(k))
-                w.bind("<Enter>", lambda e, r=row, l=lbl, d=dirlbl:
-                       [x.configure(background=theme.C["hover"]) for x in (r, l, d)])
-                w.bind("<Leave>", lambda e, r=row, l=lbl, d=dirlbl:
-                       [x.configure(background=theme.C["surface"]) for x in (r, l, d)])
-        self._position_sort_panel()
-        panel.bind("<Escape>", self._close_sort_panel)
-        # Panelet skal FOELGE vinduet, ikke blive hængende et tilfældigt sted.
-        self._sort_cfg_bind = self.bind("<Configure>",
-                                        lambda e: self._position_sort_panel(), add="+")
+        self._sort_btn.setChecked(True)
+        panel.popup_under(self._sort_btn)
 
-    def _position_sort_panel(self):
-        panel = self._sort_panel
-        if panel is None:
-            return
-        try:
-            btn = self._sort_btn
-            panel.update_idletasks()
-            x = btn.winfo_rootx()
-            y = btn.winfo_rooty() + btn.winfo_height() + 2
-            panel.geometry("+%d+%d" % (x, y))
-        except tk.TclError:
-            pass
+    def _on_sort_panel_closed(self) -> None:
+        self._sort_panel = None
+        self._sort_btn.setChecked(False)
 
-    def _apply_sort(self, key: str):
+    def _close_sort_panel(self) -> None:
+        panel, self._sort_panel = self._sort_panel, None
+        self._sort_btn.setChecked(False)
+        if panel is not None:
+            panel.close()
+
+    def _apply_sort(self, key: str) -> None:
         if not self.model.files:
             return
         reverse = self._sort_dir.get(key, False)
@@ -1956,45 +1295,317 @@ class PDFTool(tk.Tk):
         self._refresh_status()
         # Panelet bliver staaende (det er hele pointen) -- gentegn kun pilene.
         if self._sort_panel is not None:
+            btn = self._sort_btn
             self._close_sort_panel()
-            self._build_sort_panel()
+            panel = dialogs.SortPanel(self, self._SORT_ROWS, self._sort_dir)
+            panel.chosen.connect(self._apply_sort)
+            panel.destroyed.connect(self._on_sort_panel_closed)
+            self._sort_panel = panel
+            self._sort_btn.setChecked(True)
+            panel.popup_under(btn)
 
-    def _toggle_crop_tool(self):
-        """Slaa beskaerings-vaerktoejet til i fremviseren."""
-        if self.page_view is None:
+    # ------------------------------------------------------------------
+    # Maskering: bekræftelse før gem
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _count_redactions(entries) -> int:
+        return sum(1 for f in entries for pg in getattr(f, "pages", [])
+                   for a in pg.annots if a.kind == annotations.ANNOT_REDACT)
+
+    def _confirm_redactions(self, entries) -> bool:
+        """Maskering er uigenkaldelig i outputtet (``apply_redactions`` skriver
+        indholdsstroemmen om). Advar foer ethvert gem der bager den ind."""
+        n = self._count_redactions(entries)
+        if n == 0:
+            return True
+        return qt_util.ask_yes_no(
+            self, _("Bekræft maskering"),
+            _("Dokumentet indeholder %s maskering(er), som fjerner indhold "
+              "permanent i den gemte fil og ikke kan fortrydes i outputtet. "
+              "Vil du fortsætte?") % n, dangerous=True)
+
+    # ------------------------------------------------------------------
+    # Per-side eksport
+    # ------------------------------------------------------------------
+    def export_single_page(self, page_uid, fmt) -> None:
+        """Eksportér ÉN side til sin egen fil. ``fmt`` i {pdf, md, epub, jpg, png}.
+        JPG/PNG holdes bevidst UDE af ``export_formats.FORMAT_ORDER`` (de er
+        meningsloese i flet-dialogen); de rasterer den faerdige side."""
+        found = self.model.page_by_uid(page_uid)
+        if not found:
             return
-        self.page_view.activate_crop_tool()
+        entry, page = found
+        # En indsat side har sin egen (ukrypterede) kildefil -- laase-tjekket
+        # gaelder kun sider der faktisk kommer fra entry.path.
+        own = os.path.normcase(page.src_path) == os.path.normcase(entry.path)
+        if (own and entry.kind == em.KIND_PDF
+                and entry.enc_key not in (pdf_utils.ENC_DECRYPTED,
+                                          pdf_utils.ENC_NOT_ENCRYPTED)):
+            qt_util.info(self, _("Eksport"), _("Siden kan ikke eksporteres (låst fil)."))
+            return
+        ext = {"pdf": ".pdf", "md": ".md", "epub": ".epub",
+               "jpg": ".jpg", "png": ".png"}.get(fmt)
+        if not ext:
+            return
+        if any(a.kind == annotations.ANNOT_REDACT for a in page.annots):
+            if not self._confirm_redactions([entry]):
+                return
+        stem = Path(page.src_path).stem
+        suggested = "%s_side%d%s" % (stem, page.src_index + 1, ext)
+        out_path, _sel = QFileDialog.getSaveFileName(
+            self, _("Eksportér side"), suggested,
+            qt_util.name_filter(fmt.upper(), "*" + ext))
+        if not out_path:
+            return
+        pdf_renderer.clear_doc_cache()
+        job = save_pipeline.FileJob(
+            path=page.src_path,
+            kind=entry.kind if own else em.kind_for_path(page.src_path),
+            enc_key=entry.enc_key if own else pdf_utils.ENC_NOT_ENCRYPTED,
+            pages=[save_pipeline.PageJob(src_index=page.src_index,
+                                         rotation=page.rotation, annots=page.annots)],
+            title=stem)
+        prog = qt_util.ProgressDialog(
+            self, _("Eksporterer…"), _("Eksporterer side til %s…") % fmt.upper(),
+            cancellable=True)
+        prog.show()
+        self._export_progress = prog
+        qt_util.run_in_thread(self._export_page_worker, out_path, job,
+                              self._get_all_passwords(), fmt, stem, prog,
+                              name="export-page")
 
-    def _save_dec(self):
-        # Bed om kodeord til låste filer først, så de kan komme med i gemningen.
+    def _export_page_worker(self, out_path, job, pw, fmt, stem, prog) -> None:
+        ev = prog.cancel_event
+
+        def cancel():
+            return ev is not None and ev.is_set()
+
+        def export_progress(done, total):
+            self._queue.put((prog.set_page_progress, (done, total)))
+
+        try:
+            if fmt in ("pdf", "jpg", "png"):
+                merged, ok, fail, chapters = save_pipeline.build_document(
+                    [job], pw, is_pdf=True,
+                    apply_annots=annotations.apply_specs_to_page)
+                try:
+                    if ok == 0:
+                        raise RuntimeError(_("Siden kunne ikke behandles."))
+                    if fmt == "pdf":
+                        merged.save(out_path, garbage=3, deflate=True)
+                    else:
+                        merged[0].get_pixmap(dpi=200).save(out_path)
+                finally:
+                    merged.close()
+            else:
+                fmt_const = (export_formats.FORMAT_MD if fmt == "md"
+                             else export_formats.FORMAT_EPUB)
+                merged, ok, fail, chapters = save_pipeline.build_document(
+                    [job], pw, is_pdf=False,
+                    apply_annots=annotations.apply_specs_to_page)
+                try:
+                    if ok == 0:
+                        raise RuntimeError(_("Siden kunne ikke behandles."))
+                    export_formats.write_document(
+                        fmt_const, doc=merged, out_path=out_path, chapters=chapters,
+                        title=stem, progress=export_progress, cancel=cancel)
+                finally:
+                    merged.close()
+            self._queue.put((self._export_page_done, (out_path,)))
+        except export_formats.ExportCancelled:
+            self._queue.put((self._export_page_cancelled, (out_path,)))
+        except Exception as e:
+            logger.error("Per-side eksport fejlede: %s", e)
+            self._queue.put((self._export_page_failed, (str(e),)))
+
+    # ------------------------------------------------------------------
+    # Eksport af en markering
+    # ------------------------------------------------------------------
+    def export_pages(self, page_uids, fmt) -> None:
+        """Eksportér de markerede sider. ``fmt`` i {pdf, md, epub, jpg, png}.
+
+        PDF/Markdown/ePub bliver ÉT dokument med siderne i den raekkefoelge de
+        staar. JPG og PNG kan ikke rumme flere sider, saa dér vaelges en mappe
+        og der skrives én fil pr. side.
+        """
+        uids = [u for u in page_uids if self.model.page_by_uid(u)]
+        if not uids:
+            return
+        if len(uids) == 1:
+            return self.export_single_page(uids[0], fmt)
+        if fmt not in ("pdf", "md", "epub", "jpg", "png"):
+            return
+
+        only = set(uids)
+        entries = self._scoped_entries(only)
+        laaste = [e for e in entries
+                  if e.kind == em.KIND_PDF
+                  and e.enc_key not in (pdf_utils.ENC_DECRYPTED,
+                                        pdf_utils.ENC_NOT_ENCRYPTED)]
+        if laaste:
+            qt_util.info(self, _("Eksport"),
+                         _("Nogle af siderne ligger i låste filer og kan ikke "
+                           "eksporteres:\n\n%s")
+                         % "\n".join(Path(e.path).name for e in laaste))
+            return
+        if not self._confirm_redactions(entries):
+            return
+
+        pdf_renderer.clear_doc_cache()
+        stem = _("Valgte sider")
+        if fmt in ("jpg", "png"):
+            dest = QFileDialog.getExistingDirectory(
+                self, _("Vælg mappe til de eksporterede sider"))
+            if not dest:
+                return
+            out_target = dest
+        else:
+            ext = "." + fmt
+            out_target, _sel = QFileDialog.getSaveFileName(
+                self, _("Eksportér sider"), stem + ext,
+                qt_util.name_filter(fmt.upper(), "*" + ext))
+            if not out_target:
+                return
+            if self._is_path_locked(out_target):
+                qt_util.error(self, _("Filen er i brug"),
+                              _("Filen \"%s\" er åben i et andet program.\n"
+                                "Luk den og prøv igen.") % out_target)
+                return
+
+        jobs = save_pipeline.build_jobs(entries, only_uids=only)
+        prog = qt_util.ProgressDialog(
+            self, _("Eksporterer…"),
+            _("Eksporterer %(n)d sider til %(fmt)s…")
+            % {"n": len(uids), "fmt": fmt.upper()}, cancellable=True)
+        prog.show()
+        self._export_progress = prog
+        qt_util.run_in_thread(self._export_pages_worker, out_target, jobs,
+                              self._get_all_passwords(), fmt, stem, prog,
+                              name="export-pages")
+
+    def _export_pages_worker(self, out_target, jobs, pw, fmt, stem, prog) -> None:
+        cb = self._progress_reporters(prog)
+        try:
+            if fmt in ("jpg", "png"):
+                merged, ok, _fail, _chapters = save_pipeline.build_document(
+                    jobs, pw, is_pdf=True,
+                    apply_annots=annotations.apply_specs_to_page,
+                    report=cb["progress_report"], cancel=cb["cancel"])
+                try:
+                    if ok == 0:
+                        raise RuntimeError(_("Siderne kunne ikke behandles."))
+                    for i in range(merged.page_count):
+                        if cb["cancel"]():
+                            raise export_formats.ExportCancelled()
+                        navn = "%s_%03d.%s" % (stem, i + 1, fmt)
+                        merged[i].get_pixmap(dpi=200).save(
+                            str(Path(out_target) / navn))
+                        self._queue.put((prog.set_page_progress,
+                                         (i + 1, merged.page_count)))
+                finally:
+                    merged.close()
+                self._queue.put((self._export_pages_done, (out_target, True)))
+                return
+
+            fmt_const = {"pdf": export_formats.FORMAT_PDF,
+                         "md": export_formats.FORMAT_MD,
+                         "epub": export_formats.FORMAT_EPUB}[fmt]
+            save_pipeline.merge_worker(
+                out_target, jobs, pw, fmt_const,
+                apply_annots=annotations.apply_specs_to_page,
+                report=cb["progress_report"], ocr_report=cb["ocr_report"],
+                export_report=cb["export_report"],
+                export_progress=cb["export_progress"], cancel=cb["cancel"])
+            self._queue.put((self._export_pages_done, (out_target, False)))
+        except export_formats.ExportCancelled:
+            self._queue.put((self._export_page_cancelled, (out_target,)))
+        except Exception as e:
+            logger.error("Eksport af markering fejlede: %s", e)
+            self._queue.put((self._export_page_failed, (str(e),)))
+
+    def _export_pages_done(self, out_target, is_folder) -> None:
+        self._close_export_progress()
+        self._show_saved_dialog(
+            _("Eksport"),
+            _("Siderne er eksporteret til mappen:") if is_folder
+            else _("Siderne er eksporteret som:"),
+            Path(out_target), is_folder=is_folder)
+
+    def _close_export_progress(self) -> None:
+        if self._export_progress is not None:
+            self._export_progress.finish()
+            self._export_progress = None
+
+    def _export_page_done(self, out_path) -> None:
+        self._close_export_progress()
+        self._show_saved_dialog(_("Eksport"), _("Siden er eksporteret som:"),
+                                Path(out_path), is_folder=False)
+
+    def _export_page_failed(self, msg) -> None:
+        self._close_export_progress()
+        qt_util.error(self, _("Eksport fejlede"), msg)
+
+    def _export_page_cancelled(self, out_path) -> None:
+        self._close_export_progress()
+        self._discard(out_path)
+        qt_util.info(self, _("Annulleret"), _("Eksporten blev annulleret."))
+
+    @staticmethod
+    def _discard(path) -> None:
+        try:
+            if path and os.path.exists(path):
+                os.remove(path)
+        except OSError:
+            pass
+
+    # ------------------------------------------------------------------
+    # Gem enkeltfiler / flet
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _is_path_locked(path) -> bool:
+        """True hvis filen findes men ikke kan aabnes til skrivning -- typisk
+        fordi den er aaben i et andet program. En fil der ikke findes endnu er
+        aldrig laast."""
+        if not os.path.exists(path):
+            return False
+        try:
+            with open(path, "r+b"):
+                pass
+            return False
+        except OSError:
+            return True
+
+    def _save_dec(self) -> None:
+        # Bed om kodeord til laaste filer foerst, saa de kan komme med.
         self._ensure_all_unlocked()
-        pdf_iids = [f.iid for f in self.model.files
+        only_uids = self._page_scope()
+        pdf_iids = [f.iid for f in self._scoped_entries(only_uids)
                     if f.enc_key in (pdf_utils.ENC_DECRYPTED, pdf_utils.ENC_NOT_ENCRYPTED)]
         if not pdf_iids:
-            messagebox.showinfo(_("Gem"), _("Ingen PDF-filer at gemme."))
+            qt_util.info(self, _("Gem"), _("Ingen PDF-filer at gemme."))
             return
 
-        # Release any page-view-held source handles so a save can't self-lock them.
+        # Slip kildehaandtag sidevisningen holder, saa et gem ikke selv-laaser dem.
         pdf_renderer.clear_doc_cache()
-        fmt = self._ask_export_format()
+        fmt = dialogs.ask_export_format(self)
         if not fmt:
             return
-
-        dest_folder = filedialog.askdirectory(title=_("Vælg mappe til at gemme filer"))
+        dest_folder = QFileDialog.getExistingDirectory(
+            self, _("Vælg mappe til at gemme filer"))
         if not dest_folder:
             return
 
-        total = len(pdf_iids)
-        # Byg Tk-frie jobs fra de valgte (dekrypterbare) model-entries på hovedtråden.
         entries = [e for e in (self.model.entry_by_iid(i) for i in pdf_iids) if e is not None]
         if not self._confirm_redactions(entries):
             return
-        jobs = save_pipeline.build_jobs(entries)
+        jobs = save_pipeline.build_jobs(entries, only_uids=only_uids)
+        if not jobs:
+            qt_util.warn(self, _("Ingen sider"), _("Der er ingen sider at gemme."))
+            return
 
-        # Tjek at ingen af de tilsigtede målfiler er låst af et andet program FØR
-        # arbejdet starter. En fil der blot findes (men ikke er låst) håndteres
-        # stadig af _unique_save_path med et _1-suffiks — kun en fil der er åben i
-        # et andet program stopper os, så vi ikke tavst laver en _1-kopi i stedet.
+        # Tjek at ingen maalfil er laast af et andet program FOER arbejdet starter.
+        # En fil der blot findes haandteres af ``_unique_save_path`` med et
+        # _1-suffiks -- kun en aaben fil skal stoppe os.
         extension = export_formats.extension_for(fmt)
         is_pdf = fmt == export_formats.FORMAT_PDF
         locked = []
@@ -2005,55 +1616,76 @@ class PDFTool(tk.Tk):
                         if job.enc_key == pdf_utils.ENC_DECRYPTED else op.name)
             else:
                 name = op.stem + extension
-            target = Path(dest_folder) / name
-            if self._is_path_locked(str(target)):
-                locked.append(target.name)
+            if self._is_path_locked(str(Path(dest_folder) / name)):
+                locked.append(name)
         if locked:
-            return messagebox.showerror(
-                _("Filen er i brug"),
-                _("Følgende fil(er) er åben i et andet program:\n\n%s\n\n"
-                  "Luk dem og prøv igen.") % "\n".join(locked))
-        p_widgets = self._show_progress_dialog(_("Gemmer filer"), _("Forbereder at gemme %s filer...") % total, cancellable=True)
-        self.set_status(_("Gemmer…"))
-        threading.Thread(target=self._save_dec_worker,
-                         args=(jobs, self._get_all_passwords(), p_widgets, dest_folder, fmt),
-                         daemon=True).start()
+            qt_util.error(self, _("Filen er i brug"),
+                          _("Følgende fil(er) er åben i et andet program:\n\n%s\n\n"
+                            "Luk dem og prøv igen.") % "\n".join(locked))
+            return
 
-    def _save_dec_worker(self, jobs, pw_list, p_widgets, dest_folder, fmt):
-        ev = p_widgets.get("cancel")
-        def cancel():
-            return ev is not None and ev.is_set()
-        def progress_report(i, total):
-            self._queue.put((self._update_save_progress, (p_widgets, i, total)))
-        def ocr_report():
-            self._queue.put((self._update_ocr_status, (p_widgets,)))
-        def export_report(ext):
-            self._queue.put((self._update_export_status, (p_widgets, ext)))
-        def export_progress(done, total):
-            self._queue.put((self._update_export_progress, (p_widgets, done, total)))
+        prog = qt_util.ProgressDialog(
+            self, _("Gemmer filer"),
+            _("Forbereder at gemme %s filer...") % len(jobs), cancellable=True)
+        prog.show()
+        self.set_status(_("Gemmer…"))
+        qt_util.run_in_thread(self._save_dec_worker, jobs, self._get_all_passwords(),
+                              prog, dest_folder, fmt, name="save-each")
+
+    def _progress_reporters(self, prog):
+        """De fem callbacks ``save_pipeline`` forventer, alle marshallet til
+        UI-traaden. Samlet ét sted, fordi gem og flet bruger dem ens."""
+        ev = prog.cancel_event
+        return {
+            "cancel": lambda: ev is not None and ev.is_set(),
+            "progress_report": lambda i, total: self._queue.put(
+                (self._save_progress, (prog, i, total))),
+            "ocr_report": lambda: self._queue.put(
+                (prog.set_status, (_("Gør scannede sider søgbare (OCR)..."),))),
+            "export_report": lambda ext: self._queue.put(
+                (prog.set_status, (_("Konverterer til %s...") % ext,))),
+            "export_progress": lambda done, total: self._queue.put(
+                (prog.set_page_progress, (done, total))),
+        }
+
+    @staticmethod
+    def _save_progress(prog, current, total) -> None:
+        prog.set_fraction(current, total)
+        prog.set_status(_("Behandler fil %s af %s...") % (current, total))
+
+    def _save_dec_worker(self, jobs, pw_list, prog, dest_folder, fmt) -> None:
+        cb = self._progress_reporters(prog)
         try:
             res = save_pipeline.save_each_worker(
                 jobs, pw_list, fmt, dest_folder,
                 apply_annots=annotations.apply_specs_to_page,
-                progress_report=progress_report, ocr_report=ocr_report,
-                export_report=export_report, export_progress=export_progress, cancel=cancel)
+                progress_report=cb["progress_report"], ocr_report=cb["ocr_report"],
+                export_report=cb["export_report"],
+                export_progress=cb["export_progress"], cancel=cb["cancel"])
         except export_formats.ExportCancelled:
-            self._queue.put((self._save_dec_cancelled, (p_widgets,)))
+            self._queue.put((self._save_dec_cancelled, (prog,)))
+            return
+        except Exception as e:
+            self._queue.put((self._merge_error, (e, prog)))
             return
         self._queue.put((self._save_dec_complete,
-                         (res["saved"], res["failed"], res["missing_pages"], p_widgets, dest_folder)))
+                         (res["saved"], res["failed"], res["missing_pages"],
+                          prog, dest_folder)))
+
+    def _save_dec_cancelled(self, prog) -> None:
+        prog.finish()
+        qt_util.info(self, _("Annulleret"), _("Eksporten blev annulleret."))
 
     def _save_dec_complete(self, saved_count, failed_count, missing_pages,
-                           p_widgets, dest_folder=None):
-        p_widgets['window'].destroy()
+                           prog, dest_folder=None) -> None:
+        prog.finish()
         if failed_count > 0:
             self.set_status(_("%(ok)d gemt · %(fail)d fejlede")
                             % {"ok": saved_count, "fail": failed_count},
                             transient_ms=8000, kind="warning")
-            messagebox.showwarning(
-                _("Gem"),
-                _("%(ok)s filer gemt, %(fail)s fejlede.\nSe loggen for detaljer.")
-                % {"ok": saved_count, "fail": failed_count})
+            qt_util.warn(self, _("Gem"),
+                         _("%(ok)s filer gemt, %(fail)s fejlede.\nSe loggen for detaljer.")
+                         % {"ok": saved_count, "fail": failed_count})
         elif saved_count > 0:
             self.set_status(_("%(n)d filer gemt") % {"n": saved_count},
                             transient_ms=8000, kind="success")
@@ -2062,92 +1694,90 @@ class PDFTool(tk.Tk):
                 msg += "\n" + _("%s side(r) uden tekstlag blev ikke udtrukket") % missing_pages
             if dest_folder:
                 msg += "\n\n" + _("Filerne ligger i:")
-                self._show_saved_dialog(_("Gem"), msg, Path(dest_folder),
-                                        is_folder=True)
+                self._show_saved_dialog(_("Gem"), msg, Path(dest_folder), is_folder=True)
             else:
-                messagebox.showinfo(_("Gem"), msg)
-    
-    def _is_path_locked(self, path):
-        """True hvis filen findes men ikke kan åbnes til skrivning — typisk fordi
-        den er åben i et andet program (fx en PDF-læser der låser filen).
+                qt_util.info(self, _("Gem"), msg)
 
-        Testen er den samme kapabilitet ``save`` skal bruge: kan vi åbne målet
-        til skrivning uden at ændre indholdet. En fil der ikke findes endnu er
-        aldrig låst."""
-        if not os.path.exists(path):
-            return False
-        try:
-            with open(path, "r+b"):
-                pass
-            return False
-        except OSError:
-            return True
+    def _page_scope(self) -> set | None:
+        """Sidegitterets markering, naar den skal styre en filhandling.
 
-    def _merge(self):
+        **Mindst to sider.** Én markeret side er ikke et valg -- der er altid
+        praecis én side markeret, ogsaa naar man bare har klikket sig frem -- og
+        et "Flet og gem" der pludselig gemte den ene side ville vaere en faelde.
+        ``None`` betyder "hele dokumentet".
+        """
+        if self.page_view is None:
+            return None
+        sel = self.page_view.grid.selected_uids()
+        return set(sel) if len(sel) > 1 else None
+
+    def _scoped_entries(self, only_uids) -> list:
+        """Filerne der bidrager med mindst én side inden for ``only_uids``."""
+        if only_uids is None:
+            return list(self.model.files)
+        return [f for f in self.model.files
+                if any(p.uid in only_uids for p in f.pages)]
+
+    def _merge(self) -> None:
         if not self.model.files:
-            return messagebox.showwarning(_("Ingen filer"), _("Tilføj filer først"))
-        # On-merge: bed om kodeord til hver stadig-låst fil før fletning.
-        self._ensure_all_unlocked()
-        if not self._confirm_redactions(self.model.files):
+            qt_util.warn(self, _("Ingen filer"), _("Tilføj filer først"))
             return
-        # Release any page-view-held source handles so a save can't self-lock them.
+        self._ensure_all_unlocked()
+        only_uids = self._page_scope()
+        entries = self._scoped_entries(only_uids)
+        if not self._confirm_redactions(entries):
+            return
         pdf_renderer.clear_doc_cache()
-        fmt = self._ask_export_format()
+        fmt = dialogs.ask_export_format(self)
         if not fmt:
             return
         spec = export_formats.EXPORT_FORMATS[fmt]
-        out_path = filedialog.asksaveasfilename(
-            defaultextension=spec.extension,
-            initialfile="Flettet" + spec.extension,
-            filetypes=export_formats.format_filetypes(fmt))
-        if not out_path: return
-        # Tjek at målfilen ikke er låst FØR fletningen starter — ellers opdages
-        # det først ved save, efter alt arbejdet er gjort.
+        suggested = (_("Valgte sider") if only_uids else _("Flettet")) + spec.extension
+        out_path, _sel = QFileDialog.getSaveFileName(
+            self, _("Flet og gem"), suggested,
+            ";;".join(qt_util.name_filter(lbl, pats)
+                      for lbl, pats in export_formats.format_filetypes(fmt)))
+        if not out_path:
+            return
+        # Tjek at maalfilen ikke er laast FOER fletningen starter -- ellers
+        # opdages det foerst ved save, efter alt arbejdet er gjort.
         if self._is_path_locked(out_path):
-            return messagebox.showerror(
-                _("Filen er i brug"),
-                _("Filen \"%s\" er åben i et andet program.\n"
-                  "Luk den og prøv igen.") % out_path)
-        # Snapshot alt Tk-afhængigt på hovedtråden — workeren må ikke røre widgets.
-        # Byg en Tk-fri job-liste fra modellen (i listens rækkefølge). Selve
-        # to-pas-fletningen ligger i save_pipeline (headless-testbar).
-        jobs = save_pipeline.build_jobs(self.model.files)
-        total = len(jobs)
-        p_widgets = self._show_progress_dialog(_("Fletter PDF'er"), _("Forbereder at flette %s filer...") % total, cancellable=True)
+            qt_util.error(self, _("Filen er i brug"),
+                          _("Filen \"%s\" er åben i et andet program.\n"
+                            "Luk den og prøv igen.") % out_path)
+            return
+        jobs = save_pipeline.build_jobs(entries, only_uids=only_uids)
+        if not jobs:
+            qt_util.warn(self, _("Ingen sider"), _("Der er ingen sider at flette."))
+            return
+        prog = qt_util.ProgressDialog(
+            self, _("Fletter PDF'er"),
+            _("Forbereder at flette %s filer...") % len(jobs), cancellable=True)
+        prog.show()
         self.set_status(_("Fletter…"))
-        threading.Thread(target=self._merge_worker,
-                         args=(out_path, self._get_all_passwords(), p_widgets, fmt, jobs),
-                         daemon=True).start()
+        qt_util.run_in_thread(self._merge_worker, out_path,
+                              self._get_all_passwords(), prog, fmt, jobs,
+                              name="merge")
 
-    def _merge_worker(self, out_path, pw_list, p_widgets, fmt, jobs):
-        ev = p_widgets.get("cancel")
-        def cancel():
-            return ev is not None and ev.is_set()
-        def report(i, total):
-            self._queue.put((self._update_save_progress, (p_widgets, i, total)))
-        def ocr_report():
-            self._queue.put((self._update_ocr_status, (p_widgets,)))
-        def export_report(ext):
-            self._queue.put((self._update_export_status, (p_widgets, ext)))
-        def export_progress(done, total):
-            self._queue.put((self._update_export_progress, (p_widgets, done, total)))
+    def _merge_worker(self, out_path, pw_list, prog, fmt, jobs) -> None:
+        cb = self._progress_reporters(prog)
         try:
             res = save_pipeline.merge_worker(
                 out_path, jobs, pw_list, fmt,
                 apply_annots=annotations.apply_specs_to_page,
-                report=report, ocr_report=ocr_report, export_report=export_report,
-                export_progress=export_progress, cancel=cancel)
+                report=cb["progress_report"], ocr_report=cb["ocr_report"],
+                export_report=cb["export_report"],
+                export_progress=cb["export_progress"], cancel=cb["cancel"])
             self._queue.put((self._merge_complete,
-                             (res["ok"], res["fail"], res["missing_pages"], out_path, p_widgets)))
+                             (res["ok"], res["fail"], res["missing_pages"],
+                              out_path, prog)))
         except export_formats.ExportCancelled:
-            self._queue.put((self._merge_cancelled, (out_path, p_widgets)))
-        except export_formats.ExportError as e:
-            self._queue.put((self._merge_error, (e, p_widgets)))
+            self._queue.put((self._merge_cancelled, (out_path, prog)))
         except Exception as e:
-            self._queue.put((self._merge_error, (e, p_widgets)))
+            self._queue.put((self._merge_error, (e, prog)))
 
-    def _merge_complete(self, ok, fail, missing_pages, out_path, p_widgets):
-        p_widgets['window'].destroy()
+    def _merge_complete(self, ok, fail, missing_pages, out_path, prog) -> None:
+        prog.finish()
         self.set_status(_("Gemt: %(name)s") % {"name": Path(out_path).name},
                         transient_ms=8000, kind="success")
         msg = _("%(ok)s filer behandlet korrekt\n%(fail)s filer fejlede") \
@@ -2158,303 +1788,79 @@ class PDFTool(tk.Tk):
         self._show_saved_dialog(_("Fletning fuldført"), msg, Path(out_path),
                                 is_folder=False)
 
-    def _merge_error(self, error, p_widgets):
-        p_widgets['window'].destroy()
+    def _merge_cancelled(self, out_path, prog) -> None:
+        prog.finish()
+        self._discard(out_path)
+        qt_util.info(self, _("Annulleret"), _("Eksporten blev annulleret."))
+
+    def _merge_error(self, error, prog) -> None:
+        prog.finish()
         self.set_status(_("Fletning fejlede"), transient_ms=8000, kind="error")
-        messagebox.showerror(_("Fejl"), _("Kunne ikke gemme filen:\n%s") % error)
+        qt_util.error(self, _("Fejl"), _("Kunne ikke gemme filen:\n%s") % error)
 
-    def _build_guess_progress_window(self, title, items):
-        """Byg det fælles fremdriftsvindue for kodeords-tjek/gæt.
-
-        De to kaldere (_start_check_only og _run_guessing_process) havde tidligere
-        identisk vindue-opbygning. Returnerer (win, stop_btn, on_close); kalderen
-        sætter selv self._stop_guessing/self._stop_event før kaldet og starter
-        worker-tråden bagefter.
-        """
-        win = tk.Toplevel(self)
-        win.title(title)
-        # 720x520 (fra 500x500): giver plads til filnavn + 200px progressbar +
-        # status uden at status-kolonnen klippes.
-        win.geometry("720x520")
-
-        def on_close():
-            self._stop_guessing = True
-            self._stop_event.set()
-            self._refresh_all()
-            win.destroy()
-
-        win.protocol("WM_DELETE_WINDOW", on_close)
-        cont = ttk.Frame(win)
-        cont.pack(fill="both", expand=True, padx=8, pady=8)
-        canvas = tk.Canvas(cont)
-        vsb = ttk.Scrollbar(cont, orient="vertical", command=canvas.yview)
-        canvas.configure(yscrollcommand=vsb.set)
-        vsb.pack(side="right", fill="y")
-        canvas.pack(side="left", fill="both", expand=True)
-        frm = ttk.Frame(canvas)
-        win_id = canvas.create_window((0, 0), window=frm, anchor="nw")
-        frm.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
-        # Lad det indre frame følge canvas-bredden, så kolonne 0 (filnavn) kan give
-        # plads frem for at presse status-kolonnen ud af syne.
-        canvas.bind("<Configure>", lambda e: canvas.itemconfigure(win_id, width=e.width))
-        frm.columnconfigure(0, weight=1)
-        frm.columnconfigure(2, minsize=180)
-
-        self._guess_widgets = {}
-        for r, iid in enumerate(items):
-            ttk.Label(frm, text=Path(self.paths[iid]).name).grid(row=r, column=0, sticky="w")
-            pb = ttk.Progressbar(frm, length=200, mode="indeterminate")
-            pb.grid(row=r, column=1, padx=6)
-            lbl = ttk.Label(frm, text=_("Vent..."))
-            lbl.grid(row=r, column=2, sticky="w")
-            self._guess_widgets[iid] = (pb, lbl)
-        stop_btn = ttk.Button(win, text=_("Stop"), command=lambda: (setattr(self, '_stop_guessing', True), self._stop_event.set()))
-        stop_btn.pack(pady=4)
-        return win, stop_btn, on_close
-
-    def _start_check_only(self, items=None):
-        if items is None:
-            items = [f.iid for f in self.model.files
-                     if f.enc_key == pdf_utils.ENC_ENCRYPTED]
-        if not items:
-            return messagebox.showinfo(_("Tjek kodeliste"), _("Der er ingen krypterede PDF-filer på listen."))
-        self._stop_guessing = False
-        self._stop_event = threading.Event()
-        win, stop_btn, on_close = self._build_guess_progress_window(_("Tjekker kodeord fra liste"), items)
-
-        def finalize():
-            self._refresh_all()
-            try:
-                if stop_btn.winfo_exists():
-                    stop_btn.config(text=_("Luk"), command=on_close)
-            except tk.TclError:
-                pass
-        # Snapshot known passwords on the main thread; the worker must not read widgets.
-        known = self._get_all_passwords()
-        threading.Thread(target=lambda: (self._check_passwords_only_worker(items, known), self._queue.put((finalize, ()))), daemon=True).start()
-
-    def _check_passwords_only_worker(self, items, known_passwords):
-        # Local copy so newly found passwords can be tried against later files
-        # without re-reading widgets from this worker thread.
-        known = list(known_passwords)
-        for iid in items:
-            if self._stop_guessing: break
-            self._queue.put((self._start_guess_pb, (iid,)))
-
-            found_pw: str | None = None
-            for pw in known:
-                if self._stop_guessing:
-                    break
-                if pdf_utils.open_with_passwords(self.paths[iid], [pw]):
-                    found_pw = pw
-                    break
-
-            if found_pw:
-                if found_pw not in known:
-                    known.append(found_pw)
-                # Dedup happens on the main thread inside _append_password.
-                self._queue.put((self._append_password, (found_pw,)))
-                self._save_password_to_cache(found_pw)
-                self._queue.put((self._update_status, (iid, _("Fundet: %s") % found_pw)))
-                # Use thumbnail queue instead of individual threads (Fix for Bug 1)
-                self.page_render_mgr.invalidate_path(self.paths[iid])
-            else:
-                self._queue.put((self._update_status, (iid, _("Ikke fundet"))))
-
-            self._queue.put((self._stop_guess_pb, (iid,)))
-            if not self._stop_guessing:
-                time.sleep(0.05)
-
-    def _start_guessing(self, items=None):
-        # Create a dialog to choose mode
-        dialog = tk.Toplevel(self)
-        dialog.title(_("Vælg metode"))
-        dialog.geometry("350x250")
-        dialog.transient(self)
-        dialog.grab_set()
-        dialog.resizable(False, False)
-        
-        # Center dialog
-        x = self.winfo_x() + (self.winfo_width() - 350) // 2
-        y = self.winfo_y() + (self.winfo_height() - 250) // 2
-        dialog.geometry(f"+{x}+{y}")
-        
-        ttk.Label(dialog, text=_("Vælg type af gætning:"), font=("Segoe UI", 10, "bold")).pack(pady=(15, 10))
-        
-        # Modes
-        mode_numeric_var = tk.BooleanVar(value=True)
-
-        # Numeric option
-        f1 = ttk.Frame(dialog)
-        f1.pack(fill="x", padx=30, pady=5)
-        c1 = ttk.Checkbutton(f1, text=_("Numerisk (korte koder)"), variable=mode_numeric_var)
-        c1.pack(side="left")
-
-        # Length config
-        len_frame = ttk.Frame(dialog)
-        len_frame.pack(fill="x", padx=50)
-        ttk.Label(len_frame, text=_("Antal cifre:")).pack(side="left")
-        # Default from config (fallback 5)
-        current_max = self.config.getint("Security", "bruteforce_max_len", fallback=5)
-        len_var = tk.IntVar(value=current_max)
-        ttk.Spinbox(len_frame, from_=1, to=10, textvariable=len_var, width=5).pack(side="left", padx=5)
-
-        # Buttons
-        btn_frame = ttk.Frame(dialog)
-        btn_frame.pack(side="bottom", pady=20)
-
-        def start_action():
-            modes = {
-                'numeric': mode_numeric_var.get(),
-            }
-            if not any(modes.values()):
-                messagebox.showwarning(_("Fejl"), _("Vælg mindst én metode."), parent=dialog)
-                return
-
-            max_len = len_var.get()
-            dialog.destroy()
-            self._run_guessing_process(modes, max_len, items=items)
-
-        ttk.Button(btn_frame, text=_("Start"), command=start_action).pack(side="left", padx=5)
-        ttk.Button(btn_frame, text=_("Annuller"), command=dialog.destroy).pack(side="left", padx=5)
-
-    def _run_guessing_process(self, modes, max_len, items=None):
-        if items is None:
-            items = [f.iid for f in self.model.files
-                     if f.enc_key == pdf_utils.ENC_ENCRYPTED]
-        if not items:
-            return messagebox.showinfo(_("Gæt kodeord"), _("Der er ingen krypterede PDF-filer på listen."))
-            
-        self._stop_guessing = False
-        self._stop_event = threading.Event()
-        win, stop_btn, on_close = self._build_guess_progress_window(_("Gæt / Tjek kodeord"), items)
-
-        def finalize():
-            self._refresh_all()
-            try:
-                if stop_btn.winfo_exists():
-                    stop_btn.config(text=_("Luk"), command=on_close)
-            except tk.TclError:
-                pass
-                
-        # Snapshot known passwords on the main thread; the worker must not read widgets.
-        known = self._get_all_passwords()
-        # Pass parameters to worker
-        threading.Thread(target=lambda: (self._guess_passwords(items, modes, max_len, known), self._queue.put((finalize, ()))), daemon=True).start()
-    
-    def _update_status(self, iid, txt):
+    # ------------------------------------------------------------------
+    # Kvitteringer og Stifinder
+    # ------------------------------------------------------------------
+    def _open_in_explorer(self, target: Path, select: bool = False) -> None:
+        """Aabn en gemt fil (eller dens mappe) i Stifinder. ``select=True``
+        aabner mappen med filen markeret."""
         try:
-            _, lbl = self._guess_widgets.get(iid, (None, None))
-            if lbl and lbl.winfo_exists():
-                lbl['text'] = txt
-        except tk.TclError:
-            pass
+            target = Path(target)
+            if select and target.exists():
+                subprocess.Popen(["explorer", "/select,", str(target)])
+            else:
+                os.startfile(str(target))       # noqa: S606 - Windows-app
+        except Exception as e:
+            logger.warning("Kunne ikke aabne %s: %s", target, e)
+            self.set_status(_("Kunne ikke åbne %s") % target, transient_ms=6000,
+                            kind="warning")
 
-    # --- Main-thread helpers for the password workers (never call from a worker
-    #     thread directly; queue them so all widget access happens on the UI thread). ---
-    def _start_guess_pb(self, iid):
-        pb = self._guess_widgets.get(iid, (None, None))[0]
-        if pb and pb.winfo_exists():
-            pb.start()
+    def _show_saved_dialog(self, title, message, target: Path, *, is_folder: bool):
+        dlg = dialogs.SavedDialog(
+            self, title, message, target, is_folder=is_folder,
+            on_open=lambda p, sel: self._open_in_explorer(p, select=sel))
+        dlg.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
+        dlg.show()
+        return dlg
 
-    def _stop_guess_pb(self, iid):
-        pb = self._guess_widgets.get(iid, (None, None))[0]
-        if pb and pb.winfo_exists():
-            pb.stop()
+    def _show_credits(self) -> None:
+        dialogs.CreditsDialog(self).exec()
 
-    def _append_password(self, p):
-        """Tilføj et kodeord til app-tilstanden (main thread). Opdaterer den åbne
-        kodeord-dialog hvis den er fremme."""
+    # ------------------------------------------------------------------
+    # Kodeord: dialog, prompt, tjek og gætning
+    # ------------------------------------------------------------------
+    def _open_passwords_dialog(self) -> None:
+        if self._pw_dialog is not None:
+            self._pw_dialog.show()
+            self._pw_dialog.raise_()
+            self._pw_dialog.activateWindow()
+            return
+        dlg = dialogs.PasswordsDialog(self, self._pw_lines)
+        self._pw_dialog = dlg
+        dlg.committed.connect(self._commit_pw_lines)
+        dlg.check_requested.connect(self._start_check_only)
+        dlg.guess_requested.connect(self._start_guessing)
+        dlg.destroyed.connect(lambda: setattr(self, "_pw_dialog", None))
+        dlg.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
+        dlg.show()
+
+    def _commit_pw_lines(self, lines: list[str]) -> None:
+        self._pw_lines = list(lines)
+        self._pw_cache = None
+
+    def _append_password(self, p: str) -> None:
+        """Tilfoej et kodeord til app-tilstanden (UI-traaden). Opdaterer den
+        aabne kodeord-dialog hvis den er fremme."""
         p = (p or "").strip()
         if not p or p in self._pw_lines:
             return
         self._pw_lines.append(p)
         self._pw_cache = None
-        self._refresh_pw_dialog()
+        if self._pw_dialog is not None:
+            self._pw_dialog.sync_lines(self._pw_lines)
 
-    # --- Password manager dialog (erstatter det gamle bundpanel) -----------
-    def _open_passwords_dialog(self):
-        """Dialog til at se/redigere kodeordslisten manuelt + Tjek/Gæt over alle
-        krypterede filer. (Prompten ved åbning/tilføjelse er den primære vej;
-        denne dialog er til manuel styring.)"""
-        if self._pw_dialog is not None and self._pw_dialog.winfo_exists():
-            self._pw_dialog.deiconify()
-            self._pw_dialog.lift()
-            return
-        dlg = tk.Toplevel(self)
-        dlg.title(_("Adgangskoder"))
-        dlg.transient(self)
-        dlg.resizable(True, True)
-        self._pw_dialog = dlg
-
-        ttk.Label(dlg, text=_("Bruges til at åbne krypterede PDF'er. Ét kodeord pr. linje."),
-                  padding=(10, 10, 10, 4)).pack(anchor="w")
-
-        body = ttk.Frame(dlg, padding=(10, 0, 10, 0))
-        body.pack(fill="both", expand=True)
-        txt = tk.Text(body, width=40, height=10, wrap="none")
-        theme.style_text(txt)
-        txt.insert("1.0", "\n".join(self._pw_lines))
-        sb = ttk.Scrollbar(body, orient="vertical", command=txt.yview)
-        txt.configure(yscrollcommand=sb.set)
-        sb.pack(side="right", fill="y")
-        txt.pack(side="left", fill="both", expand=True)
-        self._pw_dialog_text = txt
-
-        btns = ttk.Frame(dlg, padding=10)
-        btns.pack(fill="x")
-
-        def commit():
-            self._commit_pw_dialog(txt)
-
-        def close():
-            commit()
-            self._pw_dialog = None
-            self._pw_dialog_text = None
-            dlg.destroy()
-
-        ttk.Button(btns, text=_("Tjek kodeliste"),
-                   command=lambda: (commit(), self._start_check_only())).pack(side="left")
-        ttk.Button(btns, text=_("Gæt kodeord"),
-                   command=lambda: (commit(), self._start_guessing())).pack(side="left", padx=(6, 0))
-        ttk.Button(btns, text=_("OK"), style="Accent.TButton",
-                   command=close).pack(side="right")
-        dlg.protocol("WM_DELETE_WINDOW", close)
-        dlg.bind("<Escape>", lambda e: close())
-
-        # Placér relativt til hovedvinduet.
-        dlg.update_idletasks()
-        x = self.winfo_x() + 60
-        y = self.winfo_y() + 80
-        dlg.geometry("+%d+%d" % (x, y))
-        txt.focus_set()
-
-    def _commit_pw_dialog(self, txt):
-        try:
-            lines = [l.strip() for l in txt.get("1.0", "end").splitlines() if l.strip()]
-        except tk.TclError:
-            return
-        self._pw_lines = list(dict.fromkeys(lines))
-        self._pw_cache = None
-
-    def _refresh_pw_dialog(self):
-        """Gen-synk dialogens tekstfelt fra self._pw_lines (fx når et gættet
-        kodeord tilføjes). No-op hvis dialogen er lukket."""
-        dlg = self._pw_dialog
-        txt = getattr(self, "_pw_dialog_text", None)
-        if dlg is None or txt is None:
-            return
-        try:
-            if not dlg.winfo_exists() or not txt.winfo_exists():
-                return
-            txt.delete("1.0", "end")
-            txt.insert("1.0", "\n".join(self._pw_lines))
-        except tk.TclError:
-            pass
-
-    # --- Unlock (prompt for password on add / open / merge) ----------------
-    def _mark_unlocked(self, iid: str, pw: str | None):
-        """Markér en fil som dekrypteret, gem kodeordet og genopfrisk miniature."""
+    def _mark_unlocked(self, iid: str, pw: str | None) -> None:
+        """Markér en fil som dekrypteret, gem kodeordet og genopfrisk visningen."""
         entry = self.model.entry_by_iid(iid)
         if entry is None:
             return
@@ -2463,15 +1869,14 @@ class PDFTool(tk.Tk):
             self._append_password(pw)
             self._save_password_to_cache(pw)
         self._prompt_on_metadata.discard(iid)
-        # Miniaturen viste hængelåsen; gen-render nu den er læsbar.
+        # Flisen viste haengelaasen; gen-render nu den er laesbar.
         self.page_render_mgr.invalidate_path(entry.path)
         if self.page_view is not None:
             self.page_view.refresh_header(iid)
-        if self.page_view is not None:
             self._schedule_page_view_refresh()
 
     def _try_known_unlock(self, iid: str) -> bool:
-        """Prøv de kendte kodeord (GUI + cache) mod filen. True hvis den åbner
+        """Proev de kendte kodeord (GUI + cache) mod filen. True hvis den aabner
         (eller ikke er krypteret)."""
         entry = self.model.entry_by_iid(iid)
         if entry is None:
@@ -2486,8 +1891,8 @@ class PDFTool(tk.Tk):
         return False
 
     def _prompt_password_for(self, iid: str) -> bool:
-        """Modal: bed om kodeord til én krypteret fil. Prøver de kendte kodeord
-        først. Tilbyder at gætte. Returnerer True hvis filen blev låst op."""
+        """Modal: bed om kodeord til én krypteret fil. Proever de kendte kodeord
+        foerst. Tilbyder at gaette. True hvis filen blev laast op."""
         entry = self.model.entry_by_iid(iid)
         if entry is None:
             return False
@@ -2496,89 +1901,33 @@ class PDFTool(tk.Tk):
         if self._try_known_unlock(iid):
             return True
 
-        name = Path(entry.path).name
-        dlg = tk.Toplevel(self)
-        dlg.title(_("Kodeord påkrævet"))
-        dlg.transient(self)
-        dlg.resizable(False, False)
-        result = {"ok": False}
-
-        ttk.Label(dlg, text=_("Filen \"%s\" er beskyttet med kodeord.") % name,
-                  wraplength=360, padding=(12, 12, 12, 6)).pack(anchor="w")
-        row = ttk.Frame(dlg, padding=(12, 0, 12, 0))
-        row.pack(fill="x")
-        pwvar = tk.StringVar()
-        ent = ttk.Entry(row, textvariable=pwvar, show="●", width=34)
-        ent.pack(side="left", fill="x", expand=True)
-        showvar = tk.BooleanVar(value=False)
-
-        def toggle_show():
-            ent.configure(show="" if showvar.get() else "●")
-        ttk.Checkbutton(dlg, text=_("Vis kodeord"), variable=showvar,
-                        command=toggle_show, padding=(12, 2, 12, 2)).pack(anchor="w")
-        err = ttk.Label(dlg, text="", foreground=theme.C["danger"], padding=(12, 0, 12, 0))
-        err.pack(anchor="w")
-
-        def submit(_e=None):
-            pw = pwvar.get()
-            if not pw:
-                return
+        def verify(pw: str) -> bool:
             doc = pdf_utils.open_with_passwords(entry.path, [pw])
-            if doc is not None:
-                doc.close()
-                self._mark_unlocked(iid, pw)
-                result["ok"] = True
-                dlg.destroy()
-            else:
-                err.configure(text=_("Forkert kodeord. Prøv igen."))
-                pwvar.set("")
-                ent.focus_set()
+            if doc is None:
+                return False
+            doc.close()
+            return True
 
-        def do_guess():
-            # Brugeren kender ikke kodeordet -> gæt. Afbryd resten af køen, så
-            # der ikke stables prompts oven på gætte-dialogen.
+        dlg = dialogs.PasswordPromptDialog(self, Path(entry.path).name, verify)
+        dlg.exec()
+        if dlg.password:
+            self._mark_unlocked(iid, dlg.password)
+            return True
+        if dlg.guess_requested:
+            # Brugeren kender ikke kodeordet -> gaet. Afbryd resten af koeen, saa
+            # der ikke stables prompts oven paa gaette-dialogen.
             self._pending_unlock.clear()
-            dlg.destroy()
-            self._guess_single_file(iid)
+            self._start_guessing(items=[iid])
+        return False
 
-        def cancel(_e=None):
-            dlg.destroy()
-
-        btns = ttk.Frame(dlg, padding=12)
-        btns.pack(fill="x")
-        ttk.Button(btns, text=_("Lås op"), style="Accent.TButton",
-                   command=submit).pack(side="right")
-        ttk.Button(btns, text=_("Gæt kodeord"),
-                   command=do_guess).pack(side="right", padx=(0, 6))
-        ttk.Button(btns, text=_("Spring over"),
-                   command=cancel).pack(side="left")
-
-        ent.bind("<Return>", submit)
-        dlg.bind("<Escape>", cancel)
-        dlg.update_idletasks()
-        dlg.geometry("+%d+%d" % (self.winfo_x() + 80, self.winfo_y() + 120))
-        ent.focus_set()
-        try:
-            dlg.grab_set()
-        except tk.TclError:
-            pass
-        self.wait_window(dlg)
-        return result["ok"]
-
-    def _guess_single_file(self, iid: str):
-        """Start gætte-flowet for netop én fil (genbruger metode-/fremdriftsdialogerne)."""
-        if self.model.entry_by_iid(iid) is None:
-            return
-        self._start_guessing(items=[iid])
-
-    def _queue_unlock_prompt(self, iid: str):
-        """Sæt en fil i kø til en modal kodeord-prompt (bruges ved tilføjelse)."""
+    def _queue_unlock_prompt(self, iid: str) -> None:
+        """Saet en fil i koe til en modal kodeord-prompt (bruges ved tilfoejelse)."""
         if iid not in self._pending_unlock:
             self._pending_unlock.append(iid)
-        self.after_idle(self._drain_unlock_prompts)
+        QTimer.singleShot(0, self._drain_unlock_prompts)
 
-    def _drain_unlock_prompts(self):
-        """Kør de køede prompts én ad gangen (aldrig genindtrædende)."""
+    def _drain_unlock_prompts(self) -> None:
+        """Koer de koeede prompts én ad gangen (aldrig genindtraedende)."""
         if self._unlocking:
             return
         self._unlocking = True
@@ -2592,382 +1941,562 @@ class PDFTool(tk.Tk):
         finally:
             self._unlocking = False
 
-    def _ensure_all_unlocked(self):
-        """Prompt for hver stadig-låst krypteret fil før flet/gem/split. Fortsætter
-        uanset (pipelinen rapporterer selv filer der stadig er låste)."""
+    def _ensure_all_unlocked(self) -> None:
+        """Prompt for hver stadig-laast krypteret fil foer flet/gem. Fortsaetter
+        uanset (pipelinen rapporterer selv filer der stadig er laaste)."""
         for iid in [f.iid for f in self.model.files]:
             entry = self.model.entry_by_iid(iid)
             if entry is not None and entry.enc_key == pdf_utils.ENC_ENCRYPTED:
                 if not self._try_known_unlock(iid):
                     self._prompt_password_for(iid)
 
-    def _guess_passwords(self, items, modes, max_len=5, known_passwords=None):
-        # Local copy so newly found passwords can be tried against later files
-        # without re-reading widgets from this worker thread.
-        known = list(known_passwords or [])
+    def _encrypted_iids(self) -> list[str]:
+        return [f.iid for f in self.model.files if f.enc_key == pdf_utils.ENC_ENCRYPTED]
+
+    def _open_guess_dialog(self, title: str, items):
+        dlg = dialogs.GuessProgressDialog(
+            self, title, items, lambda iid: Path(self.paths[iid]).name)
+        dlg.closed.connect(self._refresh_all)
+        dlg.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
+        self._guess_dialog = dlg
+        dlg.show()
+        return dlg
+
+    def _start_check_only(self, items=None) -> None:
+        items = items or self._encrypted_iids()
+        if not items:
+            qt_util.info(self, _("Tjek kodeliste"),
+                         _("Der er ingen krypterede PDF-filer på listen."))
+            return
+        dlg = self._open_guess_dialog(_("Tjekker kodeord fra liste"), items)
+        # Snapshot kodeordene paa UI-traaden; workeren maa ikke laese widgets.
+        qt_util.run_in_thread(self._check_passwords_only_worker, items,
+                              self._get_all_passwords(), dlg, name="pw-check")
+
+    def _check_passwords_only_worker(self, items, known_passwords, dlg) -> None:
+        known = list(known_passwords)
+        stop = dlg.stop_event
         for iid in items:
-            if self._stop_guessing: break
-            self._queue.put((self._start_guess_pb, (iid,)))
-
-            found_pw: str | None = None
-
-            # First check cache/known passwords (stop-aware)
+            if stop.is_set():
+                break
+            self._queue.put((dlg.start_row, (iid,)))
+            found_pw = None
             for pw in known:
-                if self._stop_guessing:
+                if stop.is_set():
+                    break
+                if pdf_utils.open_with_passwords(self.paths[iid], [pw]):
+                    found_pw = pw
+                    break
+            self._report_guess_result(dlg, iid, found_pw, known)
+            if not stop.is_set():
+                time.sleep(0.05)
+        self._queue.put((dlg.mark_finished, ()))
+        self._queue.put((self._refresh_all, ()))
+
+    def _report_guess_result(self, dlg, iid, found_pw, known) -> None:
+        """Faelles efterbehandling for tjek og gaet (kaldes fra worker-traaden)."""
+        if found_pw:
+            if found_pw not in known:
+                known.append(found_pw)
+            # Dedup sker paa UI-traaden inde i ``_append_password``.
+            self._queue.put((self._append_password, (found_pw,)))
+            self._save_password_to_cache(found_pw)
+            self._queue.put((dlg.set_row_status, (iid, _("Fundet: %s") % found_pw)))
+            self.page_render_mgr.invalidate_path(self.paths[iid])
+        else:
+            self._queue.put((dlg.set_row_status, (iid, _("Ikke fundet"))))
+        self._queue.put((dlg.stop_row, (iid,)))
+
+    def _start_guessing(self, items=None) -> None:
+        opts = dialogs.GuessOptionsDialog(
+            self, self.config.getint("Security", "bruteforce_max_len", fallback=5)).run()
+        if opts is None:
+            return
+        modes, max_len = opts
+        self._run_guessing_process(modes, max_len, items=items)
+
+    def _run_guessing_process(self, modes, max_len, items=None) -> None:
+        items = items or self._encrypted_iids()
+        if not items:
+            qt_util.info(self, _("Gæt kodeord"),
+                         _("Der er ingen krypterede PDF-filer på listen."))
+            return
+        dlg = self._open_guess_dialog(_("Gæt / Tjek kodeord"), items)
+        qt_util.run_in_thread(self._guess_passwords, items, modes, max_len,
+                              self._get_all_passwords(), dlg, name="pw-guess")
+
+    def _guess_passwords(self, items, modes, max_len, known_passwords, dlg) -> None:
+        known = list(known_passwords or [])
+        stop = dlg.stop_event
+        for iid in items:
+            if stop.is_set():
+                break
+            self._queue.put((dlg.start_row, (iid,)))
+            found_pw = None
+
+            # Kendte kodeord foerst (stop-bevidst).
+            for pw in known:
+                if stop.is_set():
                     break
                 if pdf_utils.open_with_passwords(self.paths[iid], [pw]):
                     found_pw = pw
                     break
 
-            # Check Numeric if selected
-            if not found_pw and not self._stop_guessing and modes.get('numeric'):
-                msg = _("Numerisk (max %s)...") % max_len
-                self._queue.put((self._update_status, (iid, msg)))
-
+            if not found_pw and not stop.is_set() and modes.get("numeric"):
+                self._queue.put((dlg.set_row_status,
+                                 (iid, _("Numerisk (max %s)...") % max_len)))
                 found_pw = password_guesser.guess_password(
-                    self.paths[iid],
-                    max_len=max_len,
-                    ui_stop_flag=self._stop_event
-                )
+                    self.paths[iid], max_len=max_len, ui_stop_flag=stop)
 
-            if found_pw:
-                if found_pw not in known:
-                    known.append(found_pw)
-                # Dedup happens on the main thread inside _append_password.
-                self._queue.put((self._append_password, (found_pw,)))
-                self._save_password_to_cache(found_pw)
-                self._queue.put((self._update_status, (iid, _("Fundet: %s") % found_pw)))
-                # Use thumbnail queue instead of individual threads (Fix for Bug 1)
-                self.page_render_mgr.invalidate_path(self.paths[iid])
-            else:
-                self._queue.put((self._update_status, (iid, _("Ikke fundet"))))
-
-            self._queue.put((self._stop_guess_pb, (iid,)))
-            if not self._stop_guessing:
+            self._report_guess_result(dlg, iid, found_pw, known)
+            if not stop.is_set():
                 time.sleep(0.05)
+        self._queue.put((dlg.mark_finished, ()))
+        self._queue.put((self._refresh_all, ()))
 
-    def _open_settings_window(self):
-        settings_win = tk.Toplevel(self)
-        settings_win.title(_("Indstillinger"))
-        settings_win.transient(self)
-        settings_win.grab_set()
-        settings_win.resizable(False, False)
-        settings_win.configure(background=theme.C["bg"])
-        settings_win.language_changed = False
+    # ------------------------------------------------------------------
+    # Indstillinger, log og sprogskift
+    # ------------------------------------------------------------------
+    def _open_settings_window(self) -> None:
+        dlg = dialogs.SettingsDialog(self, self)
+        dlg.exec()
+        if dlg.language_changed:
+            new_lang = self.config.get("General", "language", fallback="en")
+            self.language_code = new_lang
+            LocalizationManager.get_instance().set_language(new_lang)
+            self._rebuild_ui_for_language_change()
 
-        # --- Layout: én ensartet to-kolonne-grid. Label-kolonnen har fast bredde,
-        #     så alle kontroller flugter lodret på tværs af sektioner (som i
-        #     Windows-/Adobe-indstillinger). Sektionsoverskrift = fed label + hårstreg.
-        content = ttk.Frame(settings_win, padding=(18, 14, 18, 8))
-        content.pack(fill="both", expand=True)
-        content.columnconfigure(0, minsize=210, weight=0)
-        content.columnconfigure(1, weight=1)
-        row = [0]
-
-        def section(title):
-            if row[0] > 0:
-                ttk.Frame(content, height=10).grid(row=row[0], column=0, columnspan=2)
-                row[0] += 1
-            ttk.Label(content, text=title, font=theme.FONTS["strong"]).grid(
-                row=row[0], column=0, columnspan=2, sticky="w", pady=(2, 3))
-            row[0] += 1
-            ttk.Separator(content, orient="horizontal").grid(
-                row=row[0], column=0, columnspan=2, sticky="ew", pady=(0, 8))
-            row[0] += 1
-
-        def field(label, widget):
-            ttk.Label(content, text=label).grid(
-                row=row[0], column=0, sticky="w", padx=(0, 14), pady=5)
-            widget.grid(row=row[0], column=1, sticky="w", pady=5)
-            row[0] += 1
-
-        def full(widget, pady=5):
-            widget.grid(row=row[0], column=0, columnspan=2, sticky="w", pady=pady)
-            row[0] += 1
-
-        def hint(text):
-            ttk.Label(content, text=text, foreground=theme.C["text_muted"],
-                      font=theme.FONTS["small"], wraplength=420, justify="left").grid(
-                row=row[0], column=0, columnspan=2, sticky="w", pady=(0, 2))
-            row[0] += 1
-
-        # --- Kodeordsgætning ---
-        section(_("Kodeordsgætning"))
-        current_max_len = self.config.getint("Security", "bruteforce_max_len", fallback=5)
-        self.max_len_var = tk.IntVar(value=current_max_len)
-        field(_("Maksimal længde at gætte:"),
-              ttk.Spinbox(content, from_=1, to=10, textvariable=self.max_len_var, width=6))
-        hint(_("Antal cifre i numeriske koder brute-force forsøger."))
-
-        # --- Sprog ---
-        section(_("Sprog"))
-        language_names = LocalizationManager.get_supported_languages()
-        self.language_var = tk.StringVar(
-            value=LocalizationManager.get_language_name(self.language_code))
-        lang_combobox = ttk.Combobox(content, textvariable=self.language_var,
-                                     values=language_names, state="readonly", width=24)
-        field(_("Sprog:"), lang_combobox)
-        hint(_("Sprogændringer træder i kraft, når du lukker vinduet."))
-
-        def on_language_selected(_e=None):
-            lang_code = LocalizationManager.get_language_code(self.language_var.get())
-            if lang_code == self.language_code:
-                settings_win.language_changed = False
-                return
-            self.config.set("General", "language", lang_code)
-            self.config.save()
-            settings_win.language_changed = True
-        lang_combobox.bind("<<ComboboxSelected>>", on_language_selected)
-
-        # --- Windows-integration ---
-        section(_("Windows-integration"))
-        ctx_var = tk.BooleanVar(value=context_menu.is_registered())
-
-        def _toggle_ctx():
-            try:
-                if ctx_var.get():
-                    context_menu.register()
-                else:
-                    context_menu.unregister()
-            except Exception as e:
-                self._show_custom_dialog(_("Fejl"), str(e), "error", parent_window=settings_win)
-                ctx_var.set(not ctx_var.get())
-        full(ttk.Checkbutton(
-            content,
-            text=_("Tilføj 'Flet med UniteDocs' til højreklik-menuen for PDF-filer"),
-            variable=ctx_var, command=_toggle_ctx))
-
-        # --- Opdateringer ---
-        section(_("Opdateringer"))
-        auto_var = tk.BooleanVar(
-            value=self.config.getboolean("Updates", "auto_check", fallback=True))
-
-        def _toggle_auto_update():
-            # Skrives med det samme (som sprogvalget), ikke ved lukning — så
-            # indstillingen overlever også en hård afslutning.
-            self.config.set("Updates", "auto_check", "1" if auto_var.get() else "0")
-            self.config.save()
-
-        full(ttk.Checkbutton(
-            content,
-            text=_("Søg automatisk efter opdateringer (én gang om ugen)"),
-            variable=auto_var, command=_toggle_auto_update))
-        hint(_("Unite Docs kontakter www.uniteapps.dk og spørger altid, "
-               "før noget hentes eller installeres."))
-        field(_("Manuel kontrol:"),
-              ttk.Button(content, text=_("Søg efter opdateringer"),
-                         command=lambda: self._start_update_check(manual=True)))
-
-        skipped_version = (self.config.get("Updates", "skipped_version",
-                                           fallback="") or "").strip()
-        if skipped_version:
-            # Uden denne udvej er "spring denne version over" en enkeltrettet dør.
-            reset_link = ttk.Label(
-                content,
-                text=_("Nulstil oversprunget version (%s)") % skipped_version,
-                foreground=theme.C["link"], cursor="hand2", font=theme.FONTS["link"])
-
-            def _reset_skipped(_e=None):
-                self.config.set("Updates", "skipped_version", "")
-                self.config.save()
-                reset_link.configure(text=_("Oversprunget version er nulstillet."),
-                                     foreground=theme.C["text_muted"],
-                                     font=theme.FONTS["small"], cursor="")
-                reset_link.unbind("<Button-1>")
-            reset_link.bind("<Button-1>", _reset_skipped)
-            full(reset_link, pady=(0, 4))
-
-        # --- Vedligeholdelse ---
-        section(_("Vedligeholdelse"))
-        field(_("Gemte kodeord:"),
-              ttk.Button(content, text=_("Slet gemte kodeord"),
-                         command=self._clear_password_cache))
-
-        # --- Log ---
-        section(_("Log"))
-        hint(_("Logfilen kan hjælpe med fejlfinding."))
-
-        def _make_link(parent, text, command):
-            link = ttk.Label(parent, text=text, foreground=theme.C["link"],
-                             cursor="hand2", font=theme.FONTS["link"])
-            link.bind("<Button-1>", lambda _e: command())
-            return link
-        log_links = ttk.Frame(content)
-        _make_link(log_links, _("Download log"),
-                   lambda: self._download_log(settings_win)).pack(side="left")
-        ttk.Label(log_links, text="   ").pack(side="left")
-        _make_link(log_links, _("Send log via e-mail"),
-                   lambda: self._email_log(settings_win)).pack(side="left")
-        full(log_links)
-
-        # --- Bundlinje: én afsluttende knap (apply-on-close) ---
-        ttk.Separator(settings_win, orient="horizontal").pack(fill="x")
-        bar = ttk.Frame(settings_win, padding=(18, 10))
-        bar.pack(fill="x")
-
-        def save_max_len_silent():
-            try:
-                v = int(self.max_len_var.get())
-            except (ValueError, tk.TclError):
-                return
-            v = max(1, min(10, v))
-            self.max_len_var.set(v)
-            self.config.set("Security", "bruteforce_max_len", str(v))
-            self.config.save()
-
-        def on_settings_close():
-            save_max_len_silent()
-            if settings_win.language_changed:
-                new_lang_code = self.config.get("General", "language", fallback="en")
-                self.language_code = new_lang_code
-                global _
-                LocalizationManager.get_instance().set_language(new_lang_code)
-                _ = LocalizationManager.get_text
-                # PreviewWindow uses LocalizationManager.get_text internally.
-                self._rebuild_ui_for_language_change()
-            settings_win.destroy()
-
-        ttk.Button(bar, text=_("Luk"), style="Accent.TButton",
-                   command=on_settings_close).pack(side="right")
-        settings_win.bind("<Escape>", lambda e: on_settings_close())
-
-        # Placér øverst-til-højre for hovedvinduet og størrelse efter indhold.
-        settings_win.update_idletasks()
-        w = settings_win.winfo_reqwidth()
-        x = self.winfo_x() + self.winfo_width() - w - 50
-        y = self.winfo_y() + 50
-        settings_win.geometry("+%d+%d" % (max(0, x), max(0, y)))
-
-        settings_win.protocol("WM_DELETE_WINDOW", on_settings_close)
-
-    def _download_log(self, parent_window=None):
-        """Gem en kopi af logfilen et sted brugeren vælger."""
+    def download_log(self, parent=None) -> None:
+        """Gem en kopi af logfilen et sted brugeren vaelger."""
         import shutil
         from .logging_config import get_log_path
 
         log_path = get_log_path()
         if not log_path.exists():
-            self._show_custom_dialog(
-                _("Log"), _("Der er ingen logfil endnu."), "info", parent_window=parent_window
-            )
+            qt_util.info(parent or self, _("Log"), _("Der er ingen logfil endnu."))
             return
-
-        dest = filedialog.asksaveasfilename(
-            title=_("Gem logfil"),
-            defaultextension=".log",
-            initialfile="unitedocs.log",
-            filetypes=[(_("Logfiler"), "*.log"), (_("Alle filer"), "*.*")],
-        )
+        dest, _sel = QFileDialog.getSaveFileName(
+            parent or self, _("Gem logfil"), "unitedocs.log",
+            ";;".join([qt_util.name_filter(_("Logfiler"), "*.log"),
+                       qt_util.name_filter(_("Alle filer"), "*.*")]))
         if not dest:
             return
         try:
             shutil.copy2(log_path, dest)
         except Exception as e:
             logger.error("Kunne ikke gemme logfil: %s", e)
-            self._show_custom_dialog(
-                _("Fejl"), _("Kunne ikke gemme logfilen: %s") % e, "error", parent_window=parent_window
-            )
+            qt_util.error(parent or self, _("Fejl"),
+                          _("Kunne ikke gemme logfilen: %s") % e)
 
-    def _email_log(self, parent_window=None):
-        """Åbn brugerens mailklient forudfyldt med de nyeste log-linjer.
+    def email_log(self, parent=None) -> None:
+        """Aabn mailklienten forudfyldt med de nyeste log-linjer.
 
-        Vedhæftning er ikke mulig via ``mailto``, og Windows afkorter lange
-        mailto-links; derfor indlejres kun de sidste linjer af loggen — nok til
-        at se den seneste fejl uden at sprænge mailto-længdegrænsen.
-        """
-        import webbrowser
+        Vedhaeftning er ikke mulig via ``mailto``, og Windows afkorter lange
+        mailto-links; derfor indlejres kun de sidste linjer af loggen."""
         from urllib.parse import quote
         from .logging_config import get_log_path
 
         log_path = get_log_path()
-
-        # De sidste ~1000 tegn (afrundet til hele linjer) er nok til at vise
-        # den seneste fejl og holder mailto-linket inden for Windows'
-        # længdegrænse (~2048 tegn efter URL-encoding).
         log_tail = _("(ingen logfil endnu)")
         try:
             if log_path.exists():
                 text = log_path.read_text(encoding="utf-8", errors="replace").rstrip()
                 tail = text[-1000:]
                 if len(text) > 1000:
-                    # Undgå at starte midt i en linje.
-                    tail = tail[tail.find("\n") + 1:]
+                    tail = tail[tail.find("\n") + 1:]     # undgaa at starte midt i en linje
                 if tail.strip():
                     log_tail = tail
         except Exception as e:
             logger.warning("Kunne ikke læse logfil til e-mail: %s", e)
 
         subject = _("UniteDocs log - version %s") % __version__
-        body = (
-            _("Beskriv venligst problemet her:")
-            + "\n\n\n"
-            + _("--- Seneste log ---")
-            + "\n"
-            + log_tail
-        )
-        mailto = "mailto:kontakt@uniteapps.dk?subject=%s&body=%s" % (quote(subject), quote(body))
-        try:
-            webbrowser.open(mailto)
-        except Exception as e:
-            logger.error("Kunne ikke åbne mailklient: %s", e)
-            self._show_custom_dialog(
-                _("Fejl"), _("Kunne ikke åbne e-mailprogrammet: %s") % e, "error", parent_window=parent_window
-            )
+        body = (_("Beskriv venligst problemet her:") + "\n\n\n"
+                + _("--- Seneste log ---") + "\n" + log_tail)
+        from PySide6.QtCore import QUrl
+        from PySide6.QtGui import QDesktopServices
+        url = QUrl("mailto:kontakt@uniteapps.dk?subject=%s&body=%s"
+                   % (quote(subject), quote(body)))
+        if not QDesktopServices.openUrl(url):
+            logger.error("Kunne ikke åbne mailklient for %s", url.toString())
+            qt_util.error(parent or self, _("Fejl"),
+                          _("Kunne ikke åbne e-mailprogrammet: %s") % url.toString())
 
-    def _rebuild_ui_for_language_change(self):
-        """Rydder og genopbygger brugerfladen for at afspejle sprogændringer."""
-        # Ingen planlagt tooltip må overleve widget-nedrivningen: en after()-
-        # callback der vækker en destrueret widget giver TclError.
+    def _rebuild_ui_for_language_change(self) -> None:
+        """Byg fladen om, saa den afspejler det nye sprog.
+
+        Modellen, undo-stakken og kodeordslisten er app-tilstand og overlever;
+        kun widgets rives ned. ``setCentralWidget`` sletter den gamle flade for
+        os, saa 8.x' manuelle ``winfo_children()``-nedrivning er vaek.
+        """
+        global _
+        _ = LocalizationManager.get_text
         Tooltip.hide_all()
-        # Annullér en planlagt status-nulstilling før statuslinjen destrueres.
-        if self._status_after is not None:
-            try:
-                self.after_cancel(self._status_after)
-            except (tk.TclError, ValueError):
-                pass
-            self._status_after = None
-        # Samme for opstartens opdateringstjek: er det stadig planlagt, ville
-        # det vågne op i et halvt genopbygget vindue.
-        if self._update_after_id is not None:
-            try:
-                self.after_cancel(self._update_after_id)
-            except (tk.TclError, ValueError):
-                pass
-            self._update_after_id = None
-
-        # Åbne dialoger kan ikke overleve at hele træet rives ned.
-        self._pw_dialog = None
-        self._insert_dialog = None
-        # Kodeordslisten lever i app-tilstand (self._pw_lines, ikke widgets) og
-        # overlever genopbygningen automatisk.
-        # EditModel BEHOLDES — det ejer iid'erne, sidetal, rotationer og annotationer.
-
-        # Nulstil UI-referencer først (før widgets ødelægges)
+        self._status_timer.stop()
+        self._update_timer.stop()
         self._close_sort_panel()
 
-        # Ryd eksisterende widgets
-        for widget in self.winfo_children():
-            widget.destroy()
+        # Aabne ikke-modale dialoger kan ikke overleve en sprogomlaegning.
+        for attr in ("_pw_dialog", "_insert_dialog"):
+            dlg = getattr(self, attr, None)
+            if dlg is not None:
+                dlg.close()
+            setattr(self, attr, None)
 
-        # Kun widget-bundne caches ryddes; modellen, rotationer og croppings består
-        # (rotations/croppings er keyet på model-ejede iid'er der overlever).
-
-        # Genindlæs UI-komponenter (kodeordstilstanden er allerede bevaret).
-        self._load_icons()
+        self.undo_stack.unsubscribe(self._update_undo_buttons)
         self._build_ui()
-
-        # Sidegitteret genudledes fra modellen med SAMME iid'er (ingen disk-læsning).
         if self.page_view is not None:
             self.page_view.rebuild()
+        self._refresh_status()
 
-    def _clear_password_cache(self):
-        cache_path = self._get_password_cache_path()
-        if cache_path.exists():
-            try:
-                os.remove(cache_path)
-                self._pw_cache = None   # invalidér den kombinerede in-memory liste
-                messagebox.showinfo(_("Cache slettet"), _("Alle gemte kodeord er slettet."))
-            except Exception as e:
-                messagebox.showerror(_("Fejl"), _("Kunne ikke slette cache: %s") % e)
+    # ==================================================================
+    # Automatisk anonymisering
+    # ==================================================================
+    # Flowet spejler kodeordsgaetningen: valgdialog -> snapshot paa UI-traaden
+    # -> fremdriftsdialog -> arbejdstraad -> resultat tilbage gennem ``_queue``.
+    # Forskellen er at anonymisering er en **session**: har brugeren foerst
+    # anonymiseret, maa en fil der tilfoejes bagefter ikke smutte umaskeret med.
+
+    def _anon_tip(self) -> str:
+        ok, why = pii.availability()
+        if not ok:
+            return why
+        return _("Find og masker CPR-numre, navne og adresser automatisk")
+
+    def _refresh_anon_button(self) -> None:
+        btn = getattr(self, "_anon_btn", None)
+        if btn is not None:
+            btn.setEnabled(pii.availability()[0])
+
+    def _run_ocr(self) -> None:
+        """Kommandobarens Tekstgenkendelse. Selve koerslen ligger i fremviseren,
+        som ejer ordlisterne markeringen bruger."""
+        if self.page_view is not None:
+            self.page_view.run_ocr()
+
+    def _start_anonymize(self) -> None:
+        ok, why = pii.availability()
+        if not ok:
+            qt_util.info(self, _("Automatisk anonymisering"), why)
+            return
+        if not self.model.files:
+            qt_util.info(self, _("Automatisk anonymisering"),
+                         _("Tilføj først en eller flere filer."))
+            return
+
+        self._ensure_pages_then_rebuild()
+        session = self._anon_session
+        all_pages = [p.uid for _f, p in self.model.flatten()]
+        new_pages = session.unscanned(self.model)
+        if not all_pages:
+            qt_util.info(self, _("Automatisk anonymisering"),
+                         _("Der er ingen sider at gennemgå."))
+            return
+
+        opts = dialogs.AnonymizeOptionsDialog(
+            self, total_pages=len(all_pages), new_pages=len(new_pages)).run()
+        if opts is None:
+            return
+
+        # Et manuelt tryk GENOPTAGER forespoergslen om nye filer. Har brugeren
+        # sagt "ikke flere filer", er det her vejen tilbage.
+        session.prompt_on_new_files = True
+
+        uids = new_pages if opts["scope"] == "new" else all_pages
+        if not uids:
+            qt_util.info(self, _("Automatisk anonymisering"),
+                         _("Der er ingen nye sider at gennemgå."))
+            return
+        self._run_anonymize(uids, allow_ocr=opts["ocr"])
+
+    def _run_anonymize(self, page_uids, *, allow_ocr=True, quiet=False) -> None:
+        """Start en scanning af ``page_uids``. ``quiet`` = ingen dialog uden fund."""
+        jobs = anonymize.build_jobs(self.model, only_uids=page_uids)
+        if not jobs:
+            return
+        prog = qt_util.ProgressDialog(
+            self, _("Automatisk anonymisering"),
+            _("Forbereder gennemgang…"), cancellable=True)
+        prog.set_busy()
+        prog.show()
+        self._anon_progress_at = 0.0
+        qt_util.run_in_thread(self._anonymize_worker, jobs,
+                              self._get_all_passwords(), allow_ocr, prog, quiet,
+                              name="anonymize")
+
+    def _anonymize_worker(self, jobs, pw, allow_ocr, prog, quiet) -> None:
+        """**Arbejdstraad.** Al UI-kontakt gaar gennem ``self._queue``."""
+        try:
+            self._queue.put((prog.set_status, (_("Indlæser sprogmodel…"),)))
+            pii.warmup()
+            result = anonymize.scan(
+                jobs, pw, allow_ocr=allow_ocr,
+                on_progress=lambda done, total, label:
+                    self._anon_progress(prog, done, total, label),
+                cancel=prog.cancel_event)
+            self._queue.put((self._anonymize_done,
+                             ([j[0] for j in jobs], result, prog, quiet)))
+        except Exception as exc:
+            logger.exception("Anonymiseringen fejlede")
+            self._queue.put((self._anonymize_failed, (prog, exc)))
+
+    def _anon_progress(self, prog, done, total, label) -> None:
+        """Kaldes fra arbejdstraaden. Struber, saa UI'en ikke drukner i signaler."""
+        now = time.monotonic()
+        if done < total and now - self._anon_progress_at < 0.12:
+            return
+        self._anon_progress_at = now
+        self._queue.put((prog.set_page_progress, (done, total)))
+        self._queue.put((prog.set_status, (
+            _("Side %(nr)d af %(alle)d · %(navn)s")
+            % {"nr": done, "alle": total, "navn": label},)))
+
+    def _anonymize_failed(self, prog, exc) -> None:
+        prog.finish()
+        if isinstance(exc, pii.ModelMissing):
+            qt_util.warn(self, _("Automatisk anonymisering"), str(exc))
         else:
-            messagebox.showinfo(_("Cache"), _("Ingen kodeordscache fundet."))
+            qt_util.error(self, _("Automatisk anonymisering"),
+                          _("Gennemgangen fejlede: %s") % exc)
+
+    def _anonymize_done(self, scanned_uids, result, prog, quiet) -> None:
+        prog.finish()
+        session = self._anon_session
+        session.has_run = True
+        # Siderne er set — ogsaa dem uden fund. Ellers ville de blive foreslaaet
+        # igen ved hver eneste "kun nye sider"-koersel.
+        session.mark_scanned(scanned_uids)
+
+        if result.cancelled and not result.findings:
+            self.set_status(_("Gennemgangen blev afbrudt"), transient_ms=6000,
+                            kind="warning")
+            return
+        if not result.findings:
+            msg = _("Der blev ikke fundet personoplysninger.")
+            if quiet:
+                self.set_status(msg, transient_ms=8000, kind="success")
+            else:
+                qt_util.info(self, _("Automatisk anonymisering"), msg)
+            return
+
+        groups = anonymize.group_findings(result.findings)
+        selected = dialogs.AnonymizeReviewDialog(
+            self, groups, result,
+            preselected=anonymize.preselect(groups, session.decisions),
+            remembered=anonymize.remembered_keys(groups, session.decisions)).run()
+        if selected is None:
+            self.set_status(_("Anonymiseringen blev annulleret"),
+                            transient_ms=6000)
+            return
+
+        session.remember(groups, selected)
+        items = anonymize.build_items(result.findings, selected, self.model)
+        if not items:
+            self.set_status(_("Ingen nye maskeringer at tilføje"),
+                            transient_ms=6000)
+            return
+
+        self.undo_stack.push(em.add_annotations_batch_cmd(
+            self.model, items, title=_("Automatisk anonymisering")))
+        if self.page_view is not None:
+            self.page_view.pcanvas.redraw_overlays()
+        self.set_status(_("%d maskeringer tilføjet") % len(items),
+                        transient_ms=9000, kind="success")
+
+    # -- nye filer efter en koersel ------------------------------------
+    def _maybe_anonymize_new_files(self) -> None:
+        """Spoerg om friskt tilfoejede filer ogsaa skal anonymiseres.
+
+        Kaldes naar sider er blevet populeret. Uden det ville en fil tilfoejet
+        efter gennemgangen glide umaskeret med i det flettede output — den
+        farligste enkeltfejl i hele funktionen.
+        """
+        session = self._anon_session
+        if not session.has_run or not session.prompt_on_new_files:
+            return
+        if getattr(self, "_anon_asking", False):
+            return
+        new_uids = session.unscanned(self.model)
+        if not new_uids:
+            return
+
+        names = []
+        for entry in self.model.files:
+            if any(p.uid in set(new_uids) for p in entry.pages):
+                names.append(os.path.basename(entry.path))
+        if not names:
+            return
+
+        if len(names) == 1:
+            text = _("\"%s\" er tilføjet efter at dokumentet blev anonymiseret. "
+                     "Skal den også gennemgås?") % names[0]
+        else:
+            text = _("%d filer er tilføjet efter at dokumentet blev "
+                     "anonymiseret. Skal de også gennemgås?") % len(names)
+
+        self._anon_asking = True
+        try:
+            choice = qt_util.ask_choice(
+                self, _("Automatisk anonymisering"), text,
+                [("scan", _("Anonymisér")),
+                 ("skip", _("Ikke denne fil") if len(names) == 1
+                  else _("Ikke disse filer")),
+                 ("never", _("Ikke flere filer"))])
+        finally:
+            self._anon_asking = False
+
+        if choice == "scan":
+            self._run_anonymize(new_uids, quiet=True)
+            return
+        if choice == "never":
+            session.prompt_on_new_files = False
+        if choice in ("skip", "never"):
+            # Markér som set, saa der ikke spoerges om de samme filer igen.
+            session.mark_scanned(new_uids)
+
+    # ------------------------------------------------------------------
+    # Kopiér tekst til udklipsholderen
+    # ------------------------------------------------------------------
+    def _copy_to_clipboard(self) -> None:
+        """Kommandobarens knap: hele dokumentet, eller markeringen hvis der er en."""
+        self.copy_to_clipboard(None)
+
+    def copy_to_clipboard(self, page_uids=None) -> None:
+        """Kopiér tekst fra ``page_uids`` (eller markeringen/hele dokumentet).
+
+        Tekstudtraekket koerer altid tekstgenkendelse paa sider uden tekstlag --
+        uden den ville en scanning blive kopieret som ingenting, og det ville
+        ligne at funktionen var i stykker.
+        """
+        if not self.model.files:
+            qt_util.warn(self, _("Ingen filer"), _("Tilføj filer først"))
+            return
+        self._ensure_all_unlocked()
+        only = set(page_uids) if page_uids else self._page_scope()
+        jobs = pseudonymize.build_jobs(self.model, only)
+        if not jobs:
+            qt_util.warn(self, _("Ingen sider"), _("Der er ingen sider at kopiere."))
+            return
+
+        ok_pii, _grund = pii.availability()
+        opts = dialogs.ClipboardOptionsDialog(
+            self, page_count=len(jobs), pii_available=ok_pii).run()
+        if not opts:
+            return
+
+        self._clip_sources = pseudonymize.source_names(self.model, only)
+        prog = qt_util.ProgressDialog(
+            self, _("Kopierer tekst"),
+            _("Læser %d side(r)…") % len(jobs), cancellable=True)
+        prog.show()
+        self.set_status(_("Læser tekst…"))
+        qt_util.run_in_thread(self._clipboard_worker, jobs,
+                              self._get_all_passwords(), opts, prog,
+                              name="clipboard-text")
+
+    def _clipboard_worker(self, jobs, pw, opts, prog) -> None:
+        ev = prog.cancel_event
+        try:
+            result = pseudonymize.scan(
+                jobs, pw, allow_ocr=True, analyze=opts["pseudonymize"],
+                on_progress=lambda d, t, lbl: self._queue.put(
+                    (self._clip_progress, (prog, d, t, lbl))),
+                cancel=ev)
+            self._queue.put((self._clipboard_done, (result, opts, prog)))
+        except pii.ModelMissing as e:
+            self._queue.put((self._clipboard_failed, (prog, e, True)))
+        except Exception as e:
+            logger.error("Tekstkopiering fejlede: %s", e)
+            self._queue.put((self._clipboard_failed, (prog, e, False)))
+
+    def _clip_progress(self, prog, done, total, label) -> None:
+        prog.set_fraction(done, total)
+        prog.set_status(_("Læser %s…") % label)
+
+    def _clipboard_failed(self, prog, exc, model_missing) -> None:
+        prog.finish()
+        self.set_status()
+        if model_missing:
+            qt_util.error(self, _("Pseudonymisering"),
+                          _("Sprogmodellen mangler, så teksten kan ikke "
+                            "pseudonymiseres.\n\n%s") % exc)
+        else:
+            qt_util.error(self, _("Kopiering fejlede"), str(exc))
+
+    def _clipboard_done(self, result, opts, prog) -> None:
+        prog.finish()
+        self.set_status()
+        if result.cancelled:
+            qt_util.info(self, _("Annulleret"), _("Kopieringen blev annulleret."))
+            return
+        if not result.pages:
+            qt_util.warn(self, _("Ingen tekst"),
+                         _("Der blev ikke fundet tekst på de valgte sider."))
+            return
+
+        pseudonyms, selected = (), None
+        if opts["pseudonymize"]:
+            groups = anonymize.group_findings(result.findings)
+            if opts["review"] and groups:
+                dlg = dialogs.AnonymizeReviewDialog(
+                    self, groups, result,
+                    intro=_("Alt er valgt. Fjern fluebenet ved det der IKKE "
+                            "skal byttes ud med et pseudonym."),
+                    ok_label=_("Kopiér med pseudonymer"),
+                    counter_fmt=_("%(valgt)d af %(alle)d forekomster byttes ud"))
+                selected = dlg.run()
+                if selected is None:
+                    return
+            else:
+                selected = {f.uid for f in result.findings}
+            pseudonyms = pseudonymize.assign(result.findings, selected)
+
+        text = pseudonymize.render(result, pseudonyms, selected)
+        QApplication.clipboard().setText(text)
+        self._last_pseudonyms = list(pseudonyms)
+        dialogs.ClipboardDoneDialog(
+            self, chars=len(text), pages=len(result.pages),
+            pseudonyms=len(pseudonyms), pseudonymized=bool(opts["pseudonymize"]),
+            ocred=result.pages_ocred, failed=result.pages_failed,
+            save_overview=self._save_pseudonym_overview).exec()
+        self.set_status(_("Teksten er kopieret til udklipsholderen."),
+                        transient_ms=6000)
+
+    def _save_pseudonym_overview(self) -> None:
+        """Gem navneoversigten. Kaldes fra kvitteringsdialogen.
+
+        Filen er den ENESTE forbindelse mellem pseudonym og original -- der er
+        ingen vej tilbage fra den kopierede tekst -- og dens foerste linje siger
+        derfor selv at den ikke maa uploades.
+        """
+        pseudonyms = getattr(self, "_last_pseudonyms", None)
+        if not pseudonyms:
+            qt_util.info(self, _("Navneoversigt"),
+                         _("Der er ingen pseudonymer at gemme."))
+            return
+        fmt = qt_util.ask_choice(
+            self, _("Gem navneoversigt"), _("Hvilket format?"),
+            [("pdf", "PDF"), ("md", _("Markdown")), ("txt", _("Tekstfil"))])
+        if not fmt:
+            return
+        ext = "." + fmt
+        out_path, _sel = QFileDialog.getSaveFileName(
+            self, _("Gem navneoversigt"), _("Pseudonymer") + ext,
+            qt_util.name_filter(fmt.upper(), "*" + ext))
+        if not out_path:
+            return
+        sources = getattr(self, "_clip_sources", ())
+        try:
+            if fmt == "pdf":
+                pseudonymize.write_overview_pdf(out_path, pseudonyms,
+                                                sources=sources)
+            else:
+                Path(out_path).write_text(
+                    pseudonymize.overview_text(pseudonyms, fmt=fmt,
+                                               sources=sources),
+                    encoding="utf-8")
+        except Exception as e:
+            logger.error("Kunne ikke gemme navneoversigten: %s", e)
+            qt_util.error(self, _("Gem navneoversigt"), str(e))
+            return
+        self._show_saved_dialog(_("Navneoversigt"), _("Oversigten er gemt som:"),
+                                Path(out_path), is_folder=False)

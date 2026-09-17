@@ -1,10 +1,9 @@
-"""Vektorikoner tegnet i kode med PIL.
+"""Vektorikoner tegnet i kode med PIL, leveret som ``QIcon``.
 
-Hvorfor ikke PNG'er: de nuvaerende ikoner er 15-25 px bitmaps der ikke kan
-farves, ikke skalerer til hoej DPI, og hvor 13 af de deklarerede filer slet ikke
-findes paa disk. Her tegnes hvert ikon som streger i et normaliseret 0..1-rum,
-rasteres i **4x supersample** og skaleres ned med LANCZOS -- skarpt i enhver
-stoerrelse og i enhver farve.
+Hvorfor ikke PNG'er eller SVG-filer: hvert ikon tegnes her som streger i et
+normaliseret 0..1-rum, rasteres i **4x supersample** og skaleres ned med
+LANCZOS. Det giver et skarpt ikon i enhver stoerrelse og enhver farve, uden en
+eneste billedfil i repoet -- og uden en SVG-renderer i Nuitka-builden.
 
 Konventioner (holdes ens over hele saettet, ellers ser baren rodet ud):
   * alt tegnes inden for 10 % margin
@@ -14,19 +13,21 @@ Konventioner (holdes ens over hele saettet, ellers ser baren rodet ud):
 **Ingen ``ImageFont.truetype``** noget sted -- bogstav-glyffer (A, T) tegnes med
 linjer. Det holder Nuitka-builden fri af ``PIL._imagingft``.
 
-Tk-integration: én ``IconFactory`` pr. Tk-interpreter ejer *alle*
-``ImageTk.PhotoImage``. Byg aldrig en PhotoImage i en lokal variabel -- Tk holder
-kun en svag reference, og billedet forsvinder ved naeste garbage collection.
+Qt-integration: ``qicon(navn)`` returnerer en cachet ``QIcon`` med baade en
+normal og en *disabled* tone lagt ind, saa Qt selv nedtoner ikonet naar knappen
+slaas fra. 8.x' ``IconFactory``/``set_button_state``-dans om ``ImageTk``-
+referencer og manuel graatoning er dermed vaek: ``QIcon`` ejer sine pixmaps.
+
+Ikonet tegnes i ``size`` logiske px, men rasteres i skaermens *device*-pixels og
+faar ``devicePixelRatio`` sat, saa det er skarpt paa 125-200 %-skaerme.
 """
 
 from __future__ import annotations
 
 import math
-import tkinter as tk
-from collections.abc import Mapping
-from tkinter import ttk
 
-from PIL import Image, ImageDraw, ImageTk
+from PIL import Image, ImageDraw
+from PySide6.QtGui import QIcon, QImage, QPixmap
 
 from . import theme
 from .logging_config import get_logger
@@ -39,6 +40,7 @@ STROKE = 0.085         # stregbredde som andel af kantlaengden
 
 _REGISTRY: dict[str, callable] = {}
 _PIL_CACHE: dict[tuple, Image.Image] = {}
+_QICON_CACHE: dict[tuple, QIcon] = {}
 _warned_missing: set[str] = set()
 
 
@@ -56,7 +58,6 @@ def has_icon(name: str) -> bool:
 
 def icon_names() -> list[str]:
     return sorted(_REGISTRY)
-
 
 # --------------------------------------------------------------------------
 # Pen: normaliseret tegne-API (0..1 i begge akser)
@@ -458,6 +459,14 @@ def _i_tool_select(p):
             (0.48, 0.84), (0.58, 0.80), (0.46, 0.54), (0.68, 0.54)])
 
 
+@icon("ocr_run")
+def _i_ocr_run(p):
+    # Tekstgenkendelse: tekstlinjer med et forstoerrelsesglas over
+    p.line((0.12, 0.16), (0.80, 0.16), caps=False)
+    p.line((0.12, 0.36), (0.32, 0.36), caps=False)
+    _magnifier(p, 0.58, 0.62, 0.22)
+
+
 @icon("tool_redact")
 def _i_tool_redact(p):
     # Boks-maskering: en udfyldt blok inde i en ramme
@@ -479,6 +488,14 @@ def _i_search_redact(p):
     p.frect(0.28, 0.38, 0.56, 0.46)
 
 
+@icon("anonymize")
+def _i_anonymize(p):
+    # Hoved og skuldre med en maskeringsbjaelke over oejnene.
+    p.circle(0.50, 0.32, 0.19)
+    p.arc(0.50, 0.98, 0.34, 180, 360)
+    p.frect(0.28, 0.26, 0.72, 0.37, r=0.02)
+
+
 @icon("insert_page")
 def _i_insert_page(p):
     # Ny side: dokument med overskrifts-bjaelke + tekstlinjer og et plus-badge
@@ -498,6 +515,40 @@ def _i_key(p):
     p.line((0.42, 0.46), (0.84, 0.88))
     p.line((0.72, 0.76), (0.84, 0.64), caps=False)
     p.line((0.60, 0.64), (0.70, 0.54), caps=False)
+
+
+@icon("panel_left")
+def _i_panel_left(p):
+    """Ramme med en udfyldt kolonne til venstre -- vis/skjul sidepanel."""
+    p.rect(0.12, 0.18, 0.88, 0.82, r=0.06)
+    p.frect(0.16, 0.22, 0.40, 0.78, r=0.04)
+
+
+@icon("select_pages")
+def _i_select_pages(p):
+    """To sider med en hake -- vaelg flere sider."""
+    p.rect(0.10, 0.10, 0.56, 0.66, r=0.05)
+    p.rect(0.26, 0.28, 0.72, 0.84, r=0.05)
+    p.line((0.52, 0.60), (0.62, 0.71), (0.86, 0.40))
+
+
+@icon("clipboard")
+def _i_clipboard(p):
+    """Klemmebraet med tekstlinjer -- kopier til udklipsholder."""
+    p.rect(0.18, 0.16, 0.82, 0.90, r=0.08)
+    p.frect(0.36, 0.08, 0.64, 0.22, r=0.04)
+    p.line((0.30, 0.44), (0.70, 0.44), caps=False)
+    p.line((0.30, 0.58), (0.70, 0.58), caps=False)
+    p.line((0.30, 0.72), (0.56, 0.72), caps=False)
+
+
+@icon("history")
+def _i_history(p):
+    """Ur med tilbagepil -- fortryd-historik."""
+    p.arc(0.52, 0.52, 0.32, 40, 330)
+    p.line((0.52, 0.34), (0.52, 0.54), (0.68, 0.62))
+    p.line((0.20, 0.30), (0.20, 0.50), caps=False)
+    p.arrow_head((0.20, 0.24), -90, 0.17)
 
 
 @icon("_missing")
@@ -560,141 +611,96 @@ def clear_pil_cache() -> None:
 
 
 # --------------------------------------------------------------------------
-# Tk-lag
+# Qt-lag
 # --------------------------------------------------------------------------
-class IconFactory:
-    """Ejer alle ``ImageTk.PhotoImage`` for ét Tk-interpreter.
+def _dpr() -> float:
+    """Skaermens device-pixel-ratio, eller 1.0 foer QApplication findes."""
+    from PySide6.QtWidgets import QApplication
+    app = QApplication.instance()
+    if app is None:
+        return 1.0
+    screen = app.primaryScreen()
+    return float(screen.devicePixelRatio()) if screen is not None else 1.0
 
-    Der maa kun findes **én** instans pr. root. PhotoImages er bundet til den
-    interpreter de blev skabt i, og Tk holder kun en svag reference til dem --
-    derfor holder ``_photos`` dem i live i rootens levetid.
+
+def pil_to_qpixmap(img: Image.Image, dpr: float = 1.0) -> QPixmap:
+    """PIL RGBA -> ``QPixmap``.
+
+    ``QImage`` kopierer ikke bufferen, saa den skal bindes til pixmappen med det
+    samme (``QPixmap.fromImage`` kopierer) -- ellers peger billedet paa
+    frigivet hukommelse. ``devicePixelRatio`` fortaeller Qt at pixmappen er
+    tegnet i device-px, saa den vises i den rigtige *logiske* stoerrelse.
     """
-
-    def __init__(self, root, scale: float | None = None):
-        self.root = root
-        self.scale = theme.scaling(root) if scale is None else scale
-        self._photos: dict[tuple, ImageTk.PhotoImage] = {}
-
-    # -- stoerrelser
-    def _px(self, size: int) -> int:
-        return max(8, int(round(size * self.scale)))
-
-    def get(self, name: str, size: int | None = None,
-            color: str | None = None) -> ImageTk.PhotoImage:
-        size = theme.ICON["cmd"] if size is None else size
-        color = theme.C["text"] if color is None else color
-        key = (name, self._px(size), color)
-        photo = self._photos.get(key)
-        if photo is None:
-            photo = ImageTk.PhotoImage(
-                render_pil(name, key[1], color), master=self.root)
-            self._photos[key] = photo
-        return photo
-
-    def cmd(self, name: str, color: str | None = None):
-        return self.get(name, theme.ICON["cmd"], color)
-
-    def tool(self, name: str, color: str | None = None):
-        return self.get(name, theme.ICON["tool"], color)
-
-    def small(self, name: str, color: str | None = None):
-        return self.get(name, theme.ICON["small"], color)
-
-    def swatch_button(self, hexcolor: str, size: int | None = None):
-        """Pen-glyf med en farvechip under -- én knap i stedet for knap + label."""
-        size = theme.ICON["cmd"] if size is None else size
-        s = self._px(size)
-        key = ("_swatch", s, hexcolor)
-        photo = self._photos.get(key)
-        if photo is not None:
-            return photo
-
-        big = s * SS
-        img = Image.new("RGBA", (big, big), (0, 0, 0, 0))
-        d = ImageDraw.Draw(img)
-        pen = _Pen(d, big, _rgba(theme.C["text"]), max(1, int(round(big * STROKE))))
-        # Pen-glyf i den oeverste 2/3
-        pen.line((0.18, 0.60), (0.62, 0.14), (0.80, 0.32), (0.36, 0.78),
-                 (0.18, 0.78), (0.18, 0.60), caps=False)
-        # Farvechip forneden, med kant saa hvid stadig kan ses
-        d.rounded_rectangle((big * 0.10, big * 0.84, big * 0.90, big * 0.98),
-                            radius=big * 0.04, fill=_rgba(hexcolor),
-                            outline=_rgba(theme.C["border_strong"]),
-                            width=max(1, int(round(big * 0.02))))
-        img = img.resize((s, s), Image.Resampling.LANCZOS)
-        photo = ImageTk.PhotoImage(img, master=self.root)
-        self._photos[key] = photo
-        return photo
-
-    def clear(self) -> None:
-        self._photos.clear()
+    if img.mode != "RGBA":
+        img = img.convert("RGBA")
+    data = img.tobytes("raw", "RGBA")
+    qimg = QImage(data, img.width, img.height, img.width * 4,
+                  QImage.Format.Format_RGBA8888)
+    pm = QPixmap.fromImage(qimg.copy())
+    pm.setDevicePixelRatio(dpr)
+    return pm
 
 
-class LazyIconDict(Mapping):
-    """Bagudkompatibel erstatning for det gamle ``self.icons``-dict.
+def qicon(name: str, size: int | None = None, color: str | None = None) -> QIcon:
+    """Cachet ``QIcon`` for ``name``.
 
-    ``main_app``, ``page_view`` og ``preview_window`` slaar op med
-    ``self.icons.get(navn)``. Her tegnes ikonet foerst ved opslag, og et ukendt
-    navn giver en synlig placeholder i stedet for ``None``.
+    Ikonet lægges ind i baade ``Normal``- og ``Disabled``-tilstand, saa Qt
+    nedtoner det korrekt naar knappen slaas fra. (8.x maatte gentegne ikonet i
+    graa manuelt, fordi ttk ikke rørte ``image=``.)
     """
+    size = theme.ICON["cmd"] if size is None else int(size)
+    color = theme.C["text"] if color is None else color
+    dpr = _dpr()
+    key = (name, size, color, round(dpr, 3))
+    cached = _QICON_CACHE.get(key)
+    if cached is not None:
+        return cached
 
-    def __init__(self, factory: IconFactory, size: int | None = None):
-        self._f = factory
-        self._size = theme.ICON["cmd"] if size is None else size
-
-    def __getitem__(self, name):
-        return self._f.get(name, self._size)
-
-    def get(self, name, default=None):  # noqa: D102 - Mapping-API
-        try:
-            return self._f.get(name, self._size)
-        except Exception as e:
-            logger.error("Kunne ikke bygge ikon '%s': %s", name, e)
-            return default
-
-    def __iter__(self):
-        return iter(_REGISTRY)
-
-    def __len__(self):
-        return len(_REGISTRY)
+    px = max(8, int(round(size * dpr)))
+    ic = QIcon()
+    ic.addPixmap(pil_to_qpixmap(render_pil(name, px, color), dpr),
+                 QIcon.Mode.Normal, QIcon.State.Off)
+    ic.addPixmap(pil_to_qpixmap(render_pil(name, px, theme.C["text_disabled"]), dpr),
+                 QIcon.Mode.Disabled, QIcon.State.Off)
+    _QICON_CACHE[key] = ic
+    return ic
 
 
-# --------------------------------------------------------------------------
-# Knap-hjaelpere (bruges fra Fase 1)
-# --------------------------------------------------------------------------
-def icon_button(parent, *, icon: str, tip, command, factory: IconFactory,
-                style: str = "Toolbutton", text: str | None = None,
-                shortcut: str | None = None, size: int | None = None,
-                color: str | None = None, **kw) -> ttk.Button:
-    """Ikonknap med tooltip. ``text`` er kun for de primaere knapper."""
-    from .tooltip import Tooltip
-
-    img = factory.get(icon, size, color)
-    if text:
-        btn = ttk.Button(parent, image=img, text=text, compound="left",
-                         style=style, command=command, **kw)
-    else:
-        btn = ttk.Button(parent, image=img, style=style, command=command, **kw)
-    btn._icon_name = icon          # så set_button_state() kan gentegne
-    btn._icon_size = size
-    if tip:
-        Tooltip.attach(btn, tip, shortcut=shortcut)
-    return btn
+def qpixmap(name: str, size: int | None = None, color: str | None = None) -> QPixmap:
+    """Enkelt pixmap (til steder der tegner direkte, fx sidegitterets haengelaas)."""
+    size = theme.ICON["small"] if size is None else int(size)
+    color = theme.C["text"] if color is None else color
+    dpr = _dpr()
+    return pil_to_qpixmap(render_pil(name, max(8, int(round(size * dpr))), color), dpr)
 
 
-def set_button_state(btn, factory: IconFactory, icon_name: str | None = None,
-                     state: str = "normal", size: int | None = None) -> None:
-    """Saet knappens state **og** gentegn ikonet i den rette tone.
+def swatch_qicon(hexcolor: str, size: int | None = None) -> QIcon:
+    """Solidt farvefelt: knappen viser selve den valgte farve.
 
-    ttk nedtoner ikke ``image=`` sammen med ``state="disabled"`` (billedet er
-    ikke en del af stilen), saa den graa variant skal tegnes eksplicit.
+    En pen med en smal chip under blev laest som et tegnevaerktoej. Et fyldt
+    felt siger "farve" uden forklaring. Kanten goer hvid synlig paa lyst.
     """
-    name = icon_name or getattr(btn, "_icon_name", None)
-    if name is None:
-        return
-    size = size if size is not None else getattr(btn, "_icon_size", None)
-    color = theme.C["text_disabled"] if state == "disabled" else theme.C["text"]
-    try:
-        btn.configure(state=state, image=factory.get(name, size, color))
-    except tk.TclError as e:
-        logger.debug("set_button_state fejlede: %s", e)
+    size = theme.ICON["cmd"] if size is None else int(size)
+    dpr = _dpr()
+    key = ("_swatch", size, hexcolor, theme.C["border_strong"], round(dpr, 3))
+    cached = _QICON_CACHE.get(key)
+    if cached is not None:
+        return cached
+
+    s = max(8, int(round(size * dpr)))
+    big = s * SS
+    img = Image.new("RGBA", (big, big), (0, 0, 0, 0))
+    d = ImageDraw.Draw(img)
+    d.rounded_rectangle((big * 0.08, big * 0.08, big * 0.92, big * 0.92),
+                        radius=big * 0.18, fill=_rgba(hexcolor),
+                        outline=_rgba(theme.C["border_strong"]),
+                        width=max(1, int(round(big * 0.05))))
+    img = img.resize((s, s), Image.Resampling.LANCZOS)
+    ic = QIcon(pil_to_qpixmap(img, dpr))
+    _QICON_CACHE[key] = ic
+    return ic
+
+
+def clear_qicon_cache() -> None:
+    """Ryd QIcon-cachen (fx naar skaermens DPI skifter)."""
+    _QICON_CACHE.clear()

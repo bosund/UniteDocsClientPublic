@@ -1,4 +1,16 @@
 # Development and build dependencies
 # Install with: pip install -r requirements-dev.txt
 
+# Test runner (tests/test_updater.py og tests/test_qt_ui.py kan begge koeres
+# direkte med python, men pytest samler dem).
+pytest
+
 pyinstaller
+
+# Dansk sprogmodel til automatisk anonymisering. Bundtes som DATA i
+# client/models/da_core_news_md (gitignoreret -- hent med
+# "python client/fetch_model.py"), ikke som pakke i den frosne build; her
+# installeres den kun for at kunne udvikle og teste. fetch_model.py kopierer
+# fra den pip-installerede kopi hvis den findes.
+# Modellens vaegte er CC BY-SA 4.0 (se client/app/credits.py).
+da_core_news_md @ https://github.com/explosion/spacy-models/releases/download/da_core_news_md-3.8.0/da_core_news_md-3.8.0-py3-none-any.whl

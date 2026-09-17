@@ -28,7 +28,8 @@ class AppConfig:
             self.create_default_config()
 
     def create_default_config(self):
-        self.config['General'] = {'theme': 'arc'}
+        # 'theme' er lys/moerk-valget: system | light | dark.
+        self.config['General'] = {'theme': 'system'}
         self.config['Security'] = {'bruteforce_max_len': '5'}
         with open(self.config_path, 'w') as configfile:
             self.config.write(configfile)

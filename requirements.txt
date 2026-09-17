@@ -31,11 +31,12 @@ pycryptodome==3.23.0
 # Image Processing
 Pillow==12.2.0
 
-# UI and Theming
-# sv-ttk (Sun Valley) er nu den eneste tema-motor — Windows 11-chrome (MIT).
-# ttkthemes/ThemedTk blev fjernet i GUI-redesignet.
-sv-ttk==2.6.1
-tkinterdnd2==0.4.3
+# UI. PySide6 (Qt for Python) er den eneste GUI-motor fra 9.0.0. LGPL-3.0 —
+# forenelig med appens AGPL-3.0, sa laenge Qt linkes DYNAMISK (det gor det:
+# bade Nuitka og PyInstaller kopierer Qt-DLL'erne ved siden af exe'en).
+# *-Essentials udelader WebEngine/Charts/3D, som appen ikke bruger.
+# sv-ttk og tkinterdnd2 blev fjernet sammen med Tkinter i 9.0.0.
+PySide6-Essentials==6.9.1
 
 # DEVELOPMENT DEPENDENCIES (Only required for building/development)
 # Internationalization tools (for updating/compiling translations)
@@ -44,3 +45,35 @@ Babel==2.18.0
 # Build tools (for creating executable)
 pyinstaller==6.19.0
 nuitka==4.1.3
+
+# --- Automatisk anonymisering ------------------------------------------
+# Microsoft Presidio finder personoplysninger (CPR, navne, adresser, ...).
+# MIT. Traekker spacy, numpy, pydantic, regex, tldextract, phonenumbers,
+# pyyaml og click ind.
+presidio-analyzer==2.2.364
+
+# NLP-motoren bag navnegenkendelsen. MIT (thinc/blis/srsly/catalogue/cymem/
+# preshed/murmurhash/wasabi/confection foelger med og er MIT/BSD).
+spacy==3.8.16
+
+# Sprogdetektion: fastText's lid.176 afgoer om en side skal gennem den ENGELSKE
+# model ogsaa. Kun predict-delen -- 102 kB faerdigbygget wheel, ingen numpy,
+# ingen kompilering. MIT.
+#
+# Hvorfor ikke en haandskreven ordliste: den blev proevet og var perfekt paa
+# prosa, men fejlede 4 ud af 5 paa engelsk UDEN funktionsord (punktlister,
+# kontraktoverskrifter, journalnotater, kontoudtog) -- netop de sider der ligger
+# i et sagsbundt. Se app/langdetect.py.
+#
+# Hvorfor ikke lingua: 170 MB wheel, stoerre end hele vores installer.
+fasttext-predict==0.9.2.4
+
+# Den danske sprogmodel er IKKE en pakke her: den bundtes som DATA i
+# client/models/da_core_news_md og loades med spacy.load(<sti>). Baade fordi
+# den saa kan vaere en valgfri installer-komponent, og fordi Nuitka ikke kan
+# slaa en model op via catalogue's entry points i en standalone-build.
+# Mappen er GITIGNORERET (52 MB binaere vaegte hoerer ikke til i historikken).
+# Hent den efter en frisk klon, og foer en build:
+#   python client/fetch_model.py
+# Compileren stopper med en fejl hvis mappen mangler.
+# Modellens vaegte er CC BY-SA 4.0 — se client/app/credits.py.

@@ -3,7 +3,17 @@
 Script til at kompilere .po filer til .mo filer for alle sprog
 """
 import os
+import sys
 from pathlib import Path
+
+# Konsollen paa Windows er cp1252; scriptets statusmarkoerer er unicode. Uden
+# dette doer koerslen paa en UnicodeEncodeError -- og skjuler den RIGTIGE fejl,
+# fordi netop fejlgrenen er den der printer et unicode-kryds.
+for stream in (sys.stdout, sys.stderr):
+    try:
+        stream.reconfigure(encoding="utf-8", errors="replace")
+    except (AttributeError, ValueError):
+        pass
 try:
     from babel.messages import pofile, mofile
     babel_available = True

@@ -11,65 +11,34 @@ from .logging_config import get_logger
 
 logger = get_logger(__name__)
 
+def is_frozen() -> bool:
+    """True når appen kører som pakket exe (Nuitka standalone eller PyInstaller).
+
+    **Nuitka sætter ikke ``sys.frozen``.** Den lapper kun kildekoden i de
+    tredjepartsbiblioteker der selv spørger efter flaget (se Nuitka's
+    ``*.nuitka-package.config.yml``, hvor rettelserne står som "workaround for
+    'sys.frozen' not being set") — vores egne moduler bliver ikke rørt. Et
+    Nuitka-kompileret modul kendes i stedet på globalen ``__compiled__``.
+
+    Derfor er dette det eneste sted i klienten der må afgøre spørgsmålet;
+    ``getattr(sys, "frozen", False)`` alene er falsk i den frosne build.
+    """
+    if getattr(sys, "frozen", False):          # PyInstaller (og cx_Freeze)
+        return True
+    if "__compiled__" in globals():            # dette modul er Nuitka-kompileret
+        return True
+    # Sidste udvej hvis kun entry point'et er kompileret.
+    return hasattr(sys.modules.get("__main__"), "__compiled__")
+
+
 def resource_path(relative_path: str) -> Path:
-    if getattr(sys, 'frozen', False):
+    if is_frozen():
         # Nuitka compiled exe — sys.executable er altid exe-stien uanset CWD
         base_path = Path(sys.executable).parent
     else:
         # Dev: utils.py er client/app/utils.py → .parent.parent = client/
         base_path = Path(__file__).resolve().parent.parent
     return base_path / relative_path
-
-def install_window_icon(root) -> None:
-    """Giv hovedvinduet og alle senere Toplevel-vinduer Unite Docs-ikonet.
-
-    ``iconbitmap(default=...)`` alene er ikke nok. Målt med Win32 ``WM_GETICON``
-    sætter ``default=`` hverken et ikon på det hovedvindue der allerede findes,
-    når kaldet sker, eller på Toplevel-vinduer der oprettes bagefter — begge
-    returnerer ``BIG=0 SMALL=0``, og Windows falder derfor tilbage til Tk's
-    klasse-ikon (fjeren). Kun ``iconbitmap(<fil>)`` på det enkelte vindue giver
-    vinduet et rigtigt ikon.
-
-    Derfor sættes ikonet her eksplicit på roden, og en klasse-binding på
-    ``<Map>`` giver hvert nyt Toplevel-vindue det samme ikon, når det vises.
-    Det holder nye dialoger dækket uden at hvert kaldested skal huske det.
-    """
-    import tkinter as tk  # lazy: utils bruges også fra ikke-GUI-kode
-
-    ico_path = resource_path("icon.ico")
-    if not ico_path.is_file():
-        logger.info("'icon.ico' not found. Using default icon.")
-        return
-    ico = str(ico_path)
-
-    def _apply(window) -> None:
-        try:
-            window.iconbitmap(ico)
-        except tk.TclError:
-            logger.info("Kunne ikke sætte vinduesikon på %r", window)
-
-    try:
-        # default= dækker de vinduer Tk selv laver internt; _apply dækker roden.
-        root.iconbitmap(default=ico)
-    except tk.TclError:
-        logger.info("'icon.ico' could not be loaded. Using default icon.")
-        return
-    _apply(root)
-
-    def _on_map(event) -> None:
-        window = event.widget
-        # Tcl-oprettede vinduer kommer igennem som strenge og springes over.
-        if not isinstance(window, tk.Toplevel) or getattr(window, "_ud_icon_set", False):
-            return
-        window._ud_icon_set = True
-        # Tooltips og drag-vinduet er overrideredirect: ingen titellinje at
-        # sætte et ikon på.
-        if window.wm_overrideredirect():
-            return
-        _apply(window)
-
-    root.bind_class("Toplevel", "<Map>", _on_map, add="+")
-
 
 def _force_rmtree(path: Path, max_retries: int = 5, delay_s: float = 0.1):
     """A more robust version of shutil.rmtree that retries on failure (Fix for Bug 10)."""

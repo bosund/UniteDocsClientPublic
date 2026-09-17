@@ -452,9 +452,12 @@ def remove_annotation_cmd(model: "EditModel", uid: str, spec: "AnnotationSpec") 
     return Command("Fjern annotation", do, undo)
 
 
-def add_annotations_batch_cmd(model: "EditModel", items) -> Command:
+def add_annotations_batch_cmd(model: "EditModel", items, title: str = "") -> Command:
     """One undo step for a whole batch of annotations (e.g. redact-all-matches).
-    ``items`` is an iterable of ``(page_uid, AnnotationSpec)``."""
+    ``items`` is an iterable of ``(page_uid, AnnotationSpec)``.
+
+    ``title`` names the step in the history panel; leave it empty for the
+    generic label."""
     items = list(items)
 
     def do():
@@ -465,7 +468,7 @@ def add_annotations_batch_cmd(model: "EditModel", items) -> Command:
         for uid, spec in items:
             model.remove_annotation(uid, spec.uid)
 
-    return Command("Tilføj annotationer", do, undo)
+    return Command(title or "Tilføj annotationer", do, undo)
 
 
 def reorder_files_cmd(model: "EditModel", new_order_iids: list) -> Command:

@@ -24,7 +24,7 @@ from __future__ import annotations
 
 import io
 import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 import pymupdf
@@ -33,7 +33,12 @@ from . import pdf_utils
 from . import utils
 from . import export_formats
 from . import edit_model as em
+from .localization import LocalizationManager
 from .logging_config import get_logger
+
+# Eksplicit, ikke via gettext's install()-injektion i builtins: fejlgrenen
+# nedenfor ville ellers kaste NameError hvis intet sprog naaede at blive loadet.
+_ = LocalizationManager.get_text
 
 logger = get_logger(__name__)
 
@@ -62,25 +67,39 @@ class FileJob:
 
 
 def build_jobs(entries, rotations: dict | None = None,
-               croppings: dict | None = None) -> list:
+               croppings: dict | None = None, only_uids=None) -> list:
     """Main-thread snapshot: turn a list of FileEntry (+ the per-file rotation/crop
     dicts still used by the file view) into a list of Tk-free FileJobs, in order.
 
     Pass ``model.files`` to merge everything, or a filtered subset (e.g. only the
     decryptable files) for save-each. When a file's pages are populated (page view
     has touched it) each page's own rotation/annots are used and the per-file dicts
-    are ignored; otherwise the whole-file rotation/crop from the dicts apply."""
+    are ignored; otherwise the whole-file rotation/crop from the dicts apply.
+
+    ``only_uids`` begrænser til bestemte ``PageEdit.uid`` — det er sidegitterets
+    markering. Et hul i markeringen håndteres allerede af ``_runs``, som kun
+    slår sammenhængende ``src_index`` sammen, så side 1 og 3 fra samme fil
+    lander som to indsættelser. En fil uden markerede sider udelades helt; en
+    fil hvis sider endnu ikke er hentet kan ikke have en markering og udelades
+    derfor også."""
     rotations = rotations or {}
     croppings = croppings or {}
     jobs = []
     for f in entries:
         title = Path(f.path).name
-        if f.pages_loaded and f.pages:
+        pages = f.pages
+        if only_uids is not None:
+            if not (f.pages_loaded and f.pages):
+                continue
+            pages = [p for p in f.pages if p.uid in only_uids]
+            if not pages:
+                continue
+        if f.pages_loaded and pages:
             # En fils sider kan pege på FLERE kildefiler: "Indsæt side" lægger
             # genererede sider ind midt i listen med deres egen src_path. Del
             # derfor op i sammenhængende løb pr. src_path — ét FileJob pr. løb,
             # så rækkefølgen bevares og hvert job åbner den rigtige fil.
-            for src_path, run in _src_runs(f.pages):
+            for src_path, run in _src_runs(pages):
                 own = os.path.normcase(src_path) == os.path.normcase(f.path)
                 pages = [PageJob(src_index=p.src_index, rotation=p.rotation,
                                  annots=p.annots, crop=p.crop)
@@ -189,6 +208,27 @@ def _append_error_page(merged, fname, is_pdf, chapters):
             title=fname, error_text=_("[Filen %s kunne ikke åbnes.]") % fname))
 
 
+def _map_specs_to_page(specs, vt):
+    """Flyt annotationsgeometri fra billedets A-space over paa den bagte A4-side.
+
+    Alle fire hjoerner mappes og normaliseres bagefter: en rotation paa 90 eller
+    270 grader bytter om paa hvad der er "oeverst" og "venstre", saa en simpel
+    hjoerne-for-hjoerne-kopi ville give et omvendt rektangel.
+    """
+    out = []
+    for s in specs:
+        rects = []
+        for r in s.rects:
+            a = vt.pdf_to_canvas(r[0], r[1])
+            b = vt.pdf_to_canvas(r[2], r[3])
+            rects.append((min(a[0], b[0]), min(a[1], b[1]),
+                          max(a[0], b[0]), max(a[1], b[1])))
+        strokes = tuple(tuple(vt.pdf_to_canvas(x, y) for x, y in line)
+                        for line in s.strokes)
+        out.append(replace(s, rects=tuple(rects), strokes=strokes))
+    return tuple(out)
+
+
 def build_document(jobs, pw_list, *, is_pdf, apply_annots=None,
                    report=None, cancel=None):
     """Two-pass build of one merged document from ``jobs``.
@@ -228,6 +268,21 @@ def build_document(jobs, pw_list, *, is_pdf, apply_annots=None,
                     chapters.append(export_formats.Chapter(
                         title=job.title, first_page=start, last_page=merged.page_count))
                 ok += 1
+                # Annotationer paa en billedside SKAL med her. Grenen sluttede
+                # foer med et bart ``continue``, saa intet blev lagt i
+                # ``applied`` -- og da PASS 2 kun itererer ``applied``, blev hver
+                # eneste maskering paa en billedfil droppet lydloest ved gem.
+                # Rotation og beskaering er allerede bagt ind i rasteren, saa de
+                # sendes videre som 0/None; ellers ville de blive anvendt to gange.
+                specs = job.pages[0].annots if job.pages else ()
+                if specs:
+                    vt = pdf_utils.image_a4_transform(job.path, rot, crop)
+                    mapped = _map_specs_to_page(specs, vt) if vt else ()
+                    if mapped:
+                        applied.append((start, 0, mapped, None))
+                    elif vt is None:
+                        logger.error("Kunne ikke placere maskeringer paa billedet %s",
+                                     job.path)
                 continue
 
             src = pdf_utils.open_with_passwords(job.path, pw_list)

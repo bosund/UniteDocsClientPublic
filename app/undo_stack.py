@@ -111,9 +111,48 @@ class UndoStack:
     def peek_redo_label(self) -> str | None:
         return self._redo[-1].label_key if self._redo else None
 
+    # --- historik ---------------------------------------------------------
+    # Etiketterne er UOVERSATTE noegler; kalderen koerer dem gennem _() ved
+    # visning, saa historikken ogsaa er korrekt efter et sprogskift.
+    def undo_labels(self) -> list[str]:
+        """Fortrydelige trin, nyeste FOERST."""
+        return [c.label_key for c in reversed(self._undo)]
+
+    def redo_labels(self) -> list[str]:
+        """Gentagelige trin, det naeste FOERST."""
+        return [c.label_key for c in reversed(self._redo)]
+
+    def undo_many(self, count: int) -> int:
+        """Fortryd ``count`` trin. Returnerer hvor mange der faktisk blev kørt."""
+        n = 0
+        for _ in range(max(0, int(count))):
+            if not self.can_undo:
+                break
+            self.undo()
+            n += 1
+        return n
+
+    def redo_many(self, count: int) -> int:
+        n = 0
+        for _ in range(max(0, int(count))):
+            if not self.can_redo:
+                break
+            self.redo()
+            n += 1
+        return n
+
     # --- observers --------------------------------------------------------
     def subscribe(self, cb: Callable[[], None]) -> None:
         self._subs.append(cb)
+
+    def unsubscribe(self, cb: Callable[[], None]) -> None:
+        """Meld en observer fra. Bruges naar fladen bygges om ved sprogskift:
+        knapperne fra den gamle flade er destrueret, og et kald til dem ville
+        ellers hobe sig op som doede referencer i ``_subs``."""
+        try:
+            self._subs.remove(cb)
+        except ValueError:
+            pass
 
     def _notify(self) -> None:
         for cb in self._subs:

@@ -1,125 +1,163 @@
+"""Opstart.
 
+Raekkefoelgen her er ikke tilfaeldig:
 
-import tkinter as tk
-from tkinter import ttk
-import sys
+1. **Logning** foerst, saa alt hvad der foelger kan rapportere fejl.
+2. **IPC-videresendelse** foer noget UI oprettes -- er der allerede en instans,
+   skal filerne bare sendes derover og processen doe. At bygge et vindue foerst
+   ville blinke et tomt vindue op.
+3. **``QApplication``**, tema og splash.
+4. De tunge importer (``main_app`` traekker PyMuPDF ind) sker *bag* splashen.
+
+DPI kraever ingen kode laengere. 8.x kaldte ``SetProcessDpiAwareness(1)`` foer
+det foerste Tk-vindue, fordi Tk ellers blev strukket op som en sloeret bitmap --
+og bevidst kun *system*-aware, fordi sv-ttk's sprites ikke kunne skalere. Qt er
+per-monitor-DPI-aware af sig selv og skalerer baade chrome og vores
+vektorikoner skarpt, saa hele workaround'en er vaek.
+"""
+
 import multiprocessing
+import sys
+import time
+
 from __version__ import __version__
 
 
-def _enable_dpi_awareness():
-    """Gør processen DPI-aware (kun Windows) FØR Tk oprettes.
+def _install_excepthooks():
+    """Log ufangede undtagelser fra baade UI- og worker-traade.
 
-    Uden dette strækker Windows appen op med en sløret bitmap-skalering på skærme
-    over 100 %. Med DPI-awareness rapporterer Tk den rigtige DPI, og vores
-    vektorikoner (theme.scaling/px) tegnes skarpt i den faktiske opløsning.
-
-    Vi bruger *system*-DPI-awareness (1), ikke per-monitor: sv-ttk's chrome er
-    faste PNG-sprites uden skalering, så per-monitor ville kunne efterlade chromet
-    i én skalering og vores vektorikoner i en anden på samme skærm. shcore findes
-    fra Windows 8.1; user32-kaldet er en fallback for ældre versioner. Alt er
-    pakket i try/except — DPI må aldrig forhindre opstart.
+    En vinduesbygget exe har ingen konsol, saa alt der gaar til ``stderr``
+    forsvinder sporloest. 8.x loeste det ved at overskrive Tk's
+    ``report_callback_exception``; her daekker de to standard-hooks baade
+    hovedtraaden og enhver ``threading.Thread``.
     """
-    if sys.platform != "win32":
-        return
-    import ctypes
-    try:
-        ctypes.windll.shcore.SetProcessDpiAwareness(1)  # PROCESS_SYSTEM_DPI_AWARE
-    except (AttributeError, OSError):
-        try:
-            ctypes.windll.user32.SetProcessDPIAware()   # Vista+ fallback
-        except (AttributeError, OSError):
-            pass
+    import threading
+    from app.logging_config import get_logger
+
+    log = get_logger("unitedocs")
+
+    def hook(exc_type, exc, tb):
+        log.critical("Ufanget undtagelse", exc_info=(exc_type, exc, tb))
+
+    sys.excepthook = hook
+    threading.excepthook = lambda args: log.critical(
+        "Ufanget undtagelse i tråden %s", args.thread_name if args.thread else "?",
+        exc_info=(args.exc_type, args.exc_value, args.exc_traceback))
+
+
+def _forward_to_existing(argv) -> bool:
+    """True hvis filerne blev sendt til en koerende instans (og vi skal stoppe)."""
+    from app import ipc
+
+    result = ipc.try_forward_to_existing(argv)
+    if result is True:
+        return True
+
+    if result is False and not ipc.try_become_primary():
+        # En anden proces vandt mutexen -- vent paa at dens IPC-server er klar.
+        for _ in range(60):                    # op til 30 sekunder
+            time.sleep(0.5)
+            r = ipc.try_forward_to_existing(argv)
+            if r is True:
+                return True
+            if r is False:
+                break                          # primaeren er doed -- aabn nyt vindue
+    elif result is None:
+        # En instans starter allerede (pladsholder i instances.json).
+        for _ in range(60):
+            time.sleep(0.5)
+            r = ipc.try_forward_to_existing(argv)
+            if r is True:
+                return True
+            if r is False:
+                break
+
+    # Vi er primaer -- registrér pladsholderen straks, saa sekundaerer ved det.
+    ipc.register_starting()
+    return False
 
 
 def main():
-    """
-    Main function to control application startup, including the splash screen.
-    """
     from app.logging_config import configure_logging
     configure_logging()
+    _install_excepthooks()
 
-    # IPC forward check — kør inden Tk initialiseres
-    if sys.argv[1:]:
-        import time
-        from app import ipc
+    if sys.argv[1:] and _forward_to_existing(sys.argv[1:]):
+        return
 
-        result = ipc.try_forward_to_existing(sys.argv[1:])
-        if result is True:
-            return  # Sendt til eksisterende instans
+    from PySide6.QtCore import Qt
+    from PySide6.QtGui import QIcon
+    from PySide6.QtWidgets import QApplication
 
-        if result is False and not ipc.try_become_primary():
-            # En anden proces vandt mutex — vent på at dens IPC-server er klar
-            for _ in range(60):  # op til 30 sekunder
-                time.sleep(0.5)
-                r = ipc.try_forward_to_existing(sys.argv[1:])
-                if r is True:
-                    return
-                if r is False:
-                    break  # Primæren er død — åbn nyt vindue
+    app = QApplication(sys.argv)
+    app.setApplicationName("Unite Docs")
+    app.setApplicationVersion(__version__)
+    app.setOrganizationName("Unite Apps")
 
-        elif result is None:
-            # En instans starter allerede (placeholder i instances.json)
-            for _ in range(60):  # op til 30 sekunder
-                time.sleep(0.5)
-                r = ipc.try_forward_to_existing(sys.argv[1:])
-                if r is True:
-                    return
-                if r is False:
-                    break  # Primæren er død — åbn nyt vindue
+    from app import theme, utils
+    from app.config import AppConfig
+    # Temaet skal saettes FOER splashen tegnes, ellers blinker den lys op paa en
+    # moerk skaerm. "system" foelger Windows' egen lys/moerk-indstilling.
+    theme.apply_theme(app, AppConfig().get("General", "theme", fallback="system"))
 
-        # Vi er primær — registrer placeholder straks så sekundærer ved at vi starter
-        ipc.register_starting()
+    # Ét ikon paa applikationen daekker hovedvindue OG alle dialoger. 8.x maatte
+    # saette det pr. vindue og hænge en <Map>-binding paa Toplevel-klassen,
+    # fordi Tk's ``iconbitmap(default=...)`` maalt med WM_GETICON ikke ramte
+    # nogen af dem.
+    ico = utils.resource_path("icon.ico")
+    if ico.is_file():
+        app.setWindowIcon(QIcon(str(ico)))
 
-    # DPI-awareness SKAL sættes før det første Tk-vindue oprettes (splashen nedenfor).
-    _enable_dpi_awareness()
+    splash = _make_splash(app)
+    splash.show()
+    app.processEvents()
 
-    # --- SPLASH SCREEN SETUP ---
-    splash_root = tk.Tk()
-    splash_root.title("Loading")
-    splash_root.overrideredirect(True) # Borderless window
+    splash.showMessage(_splash_text("Indlæser systembiblioteker…"),
+                       Qt.AlignmentFlag.AlignBottom | Qt.AlignmentFlag.AlignHCenter)
+    app.processEvents()
+    from app.main_app import MainWindow
 
-    # Center the splash screen
-    window_width = 400
-    window_height = 150
-    screen_width = splash_root.winfo_screenwidth()
-    screen_height = splash_root.winfo_screenheight()
-    center_x = int(screen_width/2 - window_width / 2)
-    center_y = int(screen_height/2 - window_height / 2)
-    splash_root.geometry(f'{window_width}x{window_height}+{center_x}+{center_y}')
+    window = MainWindow(initial_files=sys.argv[1:])
+    window.show()
+    splash.finish(window)
+    sys.exit(app.exec())
 
-    splash_frame = ttk.Frame(splash_root, padding=10)
-    splash_frame.pack(expand=True, fill="both")
-    ttk.Label(splash_frame, text="Unite Docs", font=("Segoe UI", 16)).pack(pady=10)
-    progress_label = ttk.Label(splash_frame, text="Starter...", font=("Segoe UI", 10))
-    progress_label.pack(pady=5)
-    progress_bar = ttk.Progressbar(splash_frame, orient="horizontal", length=300, mode="determinate")
-    progress_bar.pack(pady=10)
-    splash_root.lift()
-    splash_root.update()
 
-    def load_full_app():
-        """
-        Handles the delayed import of heavy libraries and the main application code.
-        """
-        def update_splash(text, progress):
-            progress_label.config(text=text)
-            progress_bar['value'] = progress
-            splash_root.update_idletasks()
+def _splash_text(text: str) -> str:
+    from app.localization import LocalizationManager
+    return LocalizationManager.get_text(text)
 
-        # --- DELAYED IMPORTS ---
-        update_splash("Loading system libraries...", 25)
-        from app.main_app import PDFTool
 
-        update_splash("Preparing application...", 95)
-        
-        # --- LAUNCH APPLICATION ---
-        splash_root.destroy()
-        app = PDFTool(initial_files=sys.argv[1:])
-        app.mainloop()
+def _make_splash(app):
+    """Enkel splash tegnet i kode -- ingen billedfil at holde i sync med temaet."""
+    from PySide6.QtCore import Qt
+    from PySide6.QtGui import QColor, QPainter, QPen, QPixmap
+    from PySide6.QtWidgets import QSplashScreen
 
-    splash_root.after(200, load_full_app)
-    splash_root.mainloop()
+    from app import theme
+
+    ratio = app.primaryScreen().devicePixelRatio() if app.primaryScreen() else 1.0
+    w, h = 420, 160
+    pm = QPixmap(int(w * ratio), int(h * ratio))
+    pm.setDevicePixelRatio(ratio)
+    pm.fill(QColor(theme.C["surface"]))
+
+    p = QPainter(pm)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing)
+    p.setPen(QPen(QColor(theme.C["border_strong"]), 1))
+    p.drawRect(0, 0, w - 1, h - 1)
+    p.setPen(QColor(theme.C["text"]))
+    p.setFont(theme.font("title"))
+    p.drawText(0, 0, w, h - 40, Qt.AlignmentFlag.AlignCenter, "Unite Docs")
+    p.setPen(QColor(theme.C["text_muted"]))
+    p.setFont(theme.font("small"))
+    p.drawText(0, h - 62, w, 20, Qt.AlignmentFlag.AlignCenter, "v" + __version__)
+    p.end()
+
+    splash = QSplashScreen(pm)
+    splash.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
+    return splash
+
 
 if __name__ == "__main__":
     multiprocessing.freeze_support()

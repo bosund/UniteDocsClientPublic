@@ -19,6 +19,10 @@ pycryptodome==3.23.0
 # Image Processing
 Pillow==12.2.0
 
-# UI and Theming (sv-ttk = Sun Valley, MIT — eneste tema-motor)
-sv-ttk==2.6.1
-tkinterdnd2==0.4.3
+# UI (Qt for Python, LGPL-3.0 - dynamisk linket)
+PySide6-Essentials==6.9.1
+
+# Automatisk anonymisering (PII-genkendelse). MIT.
+presidio-analyzer==2.2.364
+spacy==3.8.16
+# Sprogmodellen bundtes som data i client/models/ — se requirements.txt.

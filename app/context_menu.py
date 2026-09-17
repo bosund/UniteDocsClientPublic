@@ -1,13 +1,16 @@
 import sys
 import winreg
 
+from .utils import is_frozen
+
 _MENU_LABEL = "Flet med UniteDocs"
 _SHELL_KEY = r"shell\UniteDocs"
 
 _SUPPORTED_EXTENSIONS = [".pdf", ".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".tif"]
 
-# Only meaningful when running as a compiled exe
-IS_FROZEN = getattr(sys, "frozen", False)
+# Only meaningful when running as a compiled exe.
+# Nuitka saetter ikke sys.frozen - brug altid utils.is_frozen().
+IS_FROZEN = is_frozen()
 
 
 def _menu_key(ext: str) -> str:

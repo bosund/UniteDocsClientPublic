@@ -1,160 +1,219 @@
-"""Continuous, zoomable multi-page preview (Acrobat-style) for the page view.
+"""Kontinuerlig, zoombar fler-side-fremviser (Acrobat-agtig).
 
-Replaces the old single-page preview. Pages are stacked vertically on one scrolling
-canvas (a right-hand scrollbar is the "elevator"); the mouse wheel scrolls, Ctrl+wheel
-zooms, and the cursor tool pans by dragging. Rendering is virtualised: only pages in
-(or near) the viewport are rasterised, at the current zoom, through the shared
-:class:`~app.page_render.PageRenderManager` (workers never touch Tk).
+Siderne stables lodret paa ét rullende lærred; musehjulet scroller, Ctrl+hjul
+zoomer, og haand-vaerktoejet panorerer ved traek. Rendering er virtualiseret:
+kun sider i (eller taet paa) udsnittet rasteres, ved den aktuelle zoom, gennem
+den delte :class:`~app.page_render.PageRenderManager` -- hvis workere aldrig
+roerer UI'et.
 
-Annotations are drawn/edited directly on this canvas. Each visible page owns a
-:class:`~app.view_transform.ViewTransform` placed at its absolute canvas position, so
-canvas items scroll for free and geometry stays in unrotated source-page points.
+Annotationer tegnes og redigeres direkte her. Hver synlig side ejer en
+:class:`~app.view_transform.ViewTransform` placeret paa sin absolutte
+laerreds-position, saa geometrien altid udtrykkes i **urroterede
+kilde-side-punkter** og rotation forbliver en ren visnings-sag.
+
+**Alt males i ét lag.** 8.x byggede canvas-*items* med tags (``anno``,
+``selbox``, ``wip``, ``p:<uid>``) og hit-testede via ``find_withtag``/``bbox``.
+Her tegner ``paintEvent`` direkte fra modellen, og hit-test regnes ud af
+geometrien. Det fjerner tre klasser af fejl paa én gang: items der overlever
+deres side, ``-width``-strenge der brækker paa dansk decimalkomma, og
+indlejrede vinduer der altid laa oeverst.
 """
 
 from __future__ import annotations
 
-import threading
-import tkinter as tk
-from tkinter import ttk, simpledialog
 import dataclasses
 import uuid
 
-import pymupdf
-from PIL import ImageTk
+from PySide6.QtCore import QPoint, QRect, QRectF, Qt, QTimer, Signal
+from PySide6.QtGui import QColor, QCursor, QFont, QPainter, QPen, QPixmap
+from PySide6.QtWidgets import (QAbstractScrollArea, QApplication, QDialog,
+                               QFrame, QMenu, QPlainTextEdit, QPushButton,
+                               QVBoxLayout, QLabel)
 
-from . import edit_model as em
-from . import pdf_renderer
-from . import page_render
 from . import annotations as an
-from . import redaction
+from . import edit_model as em
+from . import icons_vector
+from . import page_render
+from . import pdf_renderer
+from . import qt_util
 from . import theme
-from .view_transform import ViewTransform
+from .localization import LocalizationManager
 from .logging_config import get_logger
+from .view_transform import ViewTransform
 
 logger = get_logger(__name__)
+_ = LocalizationManager.get_text
 
 PAGE_GAP = 16
 MARGIN = 18
 ZOOM_MIN = 0.15
 ZOOM_MAX = 6.0
 ZOOM_STEPS = (0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 2.0, 3.0, 4.0)
-# Alle farver fra theme.C -- ingen hex i denne fil.
-_CANVAS_BG = theme.C["page_gutter"]
-_PAGE_SHADOW = theme.C["page_shadow"]
-_SEL_OUTLINE = theme.C["accent"]
-_PAPER = theme.C["paper"]
-_EMPTY_FG = theme.C["page_gutter_fg"]
-_CROP_LINE = theme.C["accent"]            # gummibaand under beskaering
-_REDACT = theme.C["redact_bar"]
-_TEXTSEL = theme.C["selection"]
 
 _TEXT_TOOLS = ("highlight", "underline", "strikeout", "redact_text")
-_SHAPE_TOOLS = ("rect", "circle", "line", "ink", "freetext", "redact")
+
+#: Kortere traek end saa mange pixels er et klik, ikke en markering. Uden det
+#: ville et enkelt klik med fremhaevningsvaerktoejet lave en annotation.
+_DRAG_SLOP = 3
+_SHAPE_TOOLS = ("rect", "circle", "line", "ink", "freetext", "redact", "crop")
 
 
-def _lw(v) -> int:
-    """Stregbredde som **heltal** til canvas-item-optionen ``-width``.
-
-    Appen saetter LC_NUMERIC til dansk (komma-decimal). Tk's ``-width`` parses
-    gennem den locale-afhaengige C-``strtod``, som forkaster strengen "2.0"
-    ("bad screen distance") -- mens canvas-KOORDINATER gaar gennem Tcl's
-    locale-uafhaengige parser og derfor er fine. Et heltal undgaar problemet helt.
-    Uden dette fejler overlay-tegningen tavst (fanget i _draw_overlays), saa en
-    tegnet figur aldrig ses i preview.
-    """
-    try:
-        return max(1, int(round(float(v))))
-    except (TypeError, ValueError):
-        return 1
+def _qcolor(rgb, alpha: int = 255) -> QColor:
+    """(r, g, b) i 0..1 -> ``QColor``. Alfa i 0..255."""
+    c = QColor(*[int(round(max(0.0, min(1.0, v)) * 255)) for v in rgb[:3]])
+    c.setAlpha(alpha)
+    return c
 
 
-class PageCanvas(ttk.Frame):
+class _MultilineDialog(QDialog):
+    """Lille tekstboks til fritekst-annotationer."""
+
+    def __init__(self, parent, title: str, prompt: str, initial: str = ""):
+        super().__init__(parent)
+        self.setWindowTitle(title)
+        self.setModal(True)
+        self.resize(420, 220)
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(14, 12, 14, 12)
+        lay.setSpacing(theme.SPACE["sm"])
+        lay.addWidget(QLabel(prompt, self))
+        self._text = QPlainTextEdit(self)
+        self._text.setPlainText(initial)
+        lay.addWidget(self._text, 1)
+        cancel = QPushButton(_("Annuller"), self)
+        ok = QPushButton(_("OK"), self)
+        ok.setDefault(True)
+        cancel.clicked.connect(self.reject)
+        ok.clicked.connect(self.accept)
+        lay.addWidget(qt_util.button_row(self, cancel, ok))
+        self._text.setFocus()
+
+    def value(self) -> str | None:
+        v = self._text.toPlainText()
+        return v.strip() if v and v.strip() else None
+
+
+class PageCanvas(QAbstractScrollArea):
+
+    zoom_changed = Signal(int)      # procent
+    page_changed = Signal(str)      # uid paa den side der nu er oeverst
+
     def __init__(self, parent, app):
         super().__init__(parent)
         self.app = app
         self.rmgr = app.page_render_mgr
 
         self.zoom = 1.0
-        self._suppress_notify = False    # saet mens VI selv scroller (goto_page)
-        self.active_tool = "hand"       # "hand" (pan) | "select" | drawing tools
+        self.active_tool = "hand"       # "hand" (pan) | "select" | tegnevaerktoejer
         self.color = (1.0, 0.0, 0.0)
         self.width = 2.0
-        self.on_zoom_change = None       # callback(percent:int) set by PageView
-        self.on_page_change = None       # callback(uid) when the current page changes
-        self._last_page = None
 
-        self.pages = []                  # [{entry,page,uid,x,y,w,h,vt}]
-        self.by_uid = {}
-        self.geom = {}                   # uid -> (kind, r0, dw, dh)
-        self.words = {}                  # uid -> get_text("words")
+        self.pages: list[dict] = []      # [{entry, page, uid, x, y, w, h, vt, kind}]
+        self.by_uid: dict[str, dict] = {}
+        self.geom: dict[str, tuple] = {}
+        self.words: dict[str, list] = {}
         self.total_w = 0
         self.total_h = 0
         self._gen = 0
-        self._placed = {}                # uid -> True (image drawn at current gen)
-        self._photos = {}                # uid -> PhotoImage (keep refs alive)
-        self._layout_after = None
-        self._render_after = None
+        self._pix: dict[str, QPixmap] = {}
+        self._requested: set[str] = set()
+        self._fit_width_pending = False
+        self._suppress_notify = False    # saettes mens VI selv scroller
+        self._last_page: str | None = None
 
-        self._draw = None                # in-progress gesture
-        self._sel = None                 # (page_uid, annot_uid) selected element
-        self._text_selection = None      # {"text","rects","page_uid"}
+        self._draw = None                # igangvaerende gestus
+        self._sel = None                 # (page_uid, annot_uid)
+        self._text_selection = None      # {"text", "rects", "page_uid"}
 
-        self.canvas = tk.Canvas(self, borderwidth=0, highlightthickness=0,
-                                background=_CANVAS_BG)
-        self.vsb = ttk.Scrollbar(self, orient="vertical", command=self._yview)
-        self.hsb = ttk.Scrollbar(self, orient="horizontal", command=self._xview)
-        self.canvas.configure(yscrollcommand=self.vsb.set, xscrollcommand=self.hsb.set)
-        self.vsb.grid(row=0, column=1, sticky="ns")
-        self.hsb.grid(row=1, column=0, sticky="ew")
-        self.canvas.grid(row=0, column=0, sticky="nsew")
-        self.rowconfigure(0, weight=1)
-        self.columnconfigure(0, weight=1)
+        self.setFrameShape(QFrame.Shape.NoFrame)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.viewport().setMouseTracking(True)
+        self.verticalScrollBar().setSingleStep(40)
+        self.horizontalScrollBar().setSingleStep(40)
+        self.verticalScrollBar().valueChanged.connect(self._on_scrolled)
+        self.horizontalScrollBar().valueChanged.connect(lambda _v: self.viewport().update())
 
-        c = self.canvas
-        c.configure(takefocus=True)
-        c.bind("<Configure>", self._on_configure)
-        c.bind("<MouseWheel>", self._on_wheel)
-        c.bind("<Button-4>", self._on_wheel)
-        c.bind("<Button-5>", self._on_wheel)
-        c.bind("<Control-MouseWheel>", self._on_ctrl_wheel)
-        c.bind("<Control-Button-4>", self._on_ctrl_wheel)
-        c.bind("<Control-Button-5>", self._on_ctrl_wheel)
-        c.bind("<ButtonPress-1>", self._on_press)
-        c.bind("<B1-Motion>", self._on_motion)
-        c.bind("<ButtonRelease-1>", self._on_release)
-        c.bind("<Double-Button-1>", self._on_double)
-        # Keyboard: arrows scroll the view; PgUp/PgDn change page; Home/End ends.
-        c.bind("<Down>", lambda e: (c.yview_scroll(2, "units"), self._after_scroll()))
-        c.bind("<Up>", lambda e: (c.yview_scroll(-2, "units"), self._after_scroll()))
-        c.bind("<Left>", lambda e: c.xview_scroll(-2, "units"))
-        c.bind("<Right>", lambda e: c.xview_scroll(2, "units"))
-        c.bind("<Next>", lambda e: self._page_step(1))
-        c.bind("<Prior>", lambda e: self._page_step(-1))
-        c.bind("<Home>", lambda e: self._goto_index(0))
-        c.bind("<End>", lambda e: self._goto_index(len(self.pages) - 1))
-        c.bind("<Delete>", lambda e: self.delete_selected())
-        c.bind("<Button-3>", self._on_context)
-        c.bind("<Control-c>", lambda e: self.copy_selected_text())
-        c.bind("<Control-C>", lambda e: self.copy_selected_text())
+        self._render_timer = QTimer(self)
+        self._render_timer.setSingleShot(True)
+        self._render_timer.timeout.connect(self._refresh_visible)
 
-    # ------------------------------------------------------------------ public
-    def focus(self):
-        self.canvas.focus_set()
+        self._layout_timer = QTimer(self)
+        self._layout_timer.setSingleShot(True)
+        self._layout_timer.timeout.connect(self._relayout)
+        self._apply_cursor()
 
-    def set_tool(self, tool):
+    # ------------------------------------------------------------- offentligt
+    def set_tool(self, tool: str) -> None:
         self.active_tool = tool
         self._clear_selection()
+        self._apply_cursor()
+        self.viewport().update()
 
-    def set_color(self, rgb):
+    def set_color(self, rgb) -> None:
         self.color = rgb
+
+    def zoom_in(self) -> None:
+        self._set_zoom(self._next_zoom(1))
+
+    def zoom_out(self) -> None:
+        self._set_zoom(self._next_zoom(-1))
+
+    def set_zoom_percent(self, pct) -> None:
+        try:
+            self._set_zoom(max(ZOOM_MIN, min(ZOOM_MAX, float(pct) / 100.0)))
+        except (TypeError, ValueError):
+            return
+
+    def zoom_percent(self) -> int:
+        return int(round(self.zoom * 100))
+
+    def redraw_overlays(self) -> None:
+        """Bevaret navn fra 8.x. Nu er en gentegning alt der skal til."""
+        self.viewport().update()
+
+    def current_page_uid(self) -> str | None:
+        """Siden hvis top er naermest udsnittets top."""
+        if not self.pages:
+            return None
+        top = self.verticalScrollBar().value()
+        best = self.pages[0]
+        for p in self.pages:
+            if p["y"] <= top + 40:
+                best = p
+            else:
+                break
+        return best["uid"]
+
+    def selected_text(self) -> str:
+        return (self._text_selection or {}).get("text", "").strip()
+
+    def copy_selected_text(self) -> None:
+        text = self.selected_text()
+        if not text:
+            return
+        QApplication.clipboard().setText(text)
+        self.app.set_status(_("Tekst kopieret"), transient_ms=4000, kind="success")
+
+    def delete_selected(self) -> None:
+        if not self._sel:
+            return
+        page_uid, annot_uid = self._sel
+        found = self.app.model.page_by_uid(page_uid)
+        if found:
+            _entry, page = found
+            spec = next((a for a in page.annots if a.uid == annot_uid), None)
+            if spec is not None:
+                self.app.undo_stack.push(
+                    em.remove_annotation_cmd(self.app.model, page_uid, spec))
+        self._clear_selection()
+        self.viewport().update()
 
     def recolor_selection(self, rgb) -> bool:
         """Giv den aktuelt valgte annotation den nye farve (undo-bar).
 
         Maskeringer springes over -- de er altid sorte. Returnerer True hvis en
         annotation faktisk blev omfarvet, saa kalderen ved om farvevalget ramte
-        et element eller blot skal gaelde naeste nye tegning.
-        """
+        et element eller blot skal gaelde naeste nye tegning."""
         if not self._sel:
             return False
         page_uid, annot_uid = self._sel
@@ -170,93 +229,46 @@ class PageCanvas(ttk.Frame):
             return True
         # Frisk uid, saa remove(old)/add(new) i do/undo ikke kolliderer.
         new_spec = dataclasses.replace(spec, color=new_color, uid=uuid.uuid4().hex)
+        self._swap_annotation(page_uid, spec, new_spec, "Skift farve")
+        return True
+
+    def _swap_annotation(self, page_uid, old_spec, new_spec, label: str) -> None:
+        from .undo_stack import Command
 
         def do():
-            self.app.model.remove_annotation(page_uid, annot_uid)
+            self.app.model.remove_annotation(page_uid, old_spec.uid)
             self.app.model.add_annotation(page_uid, new_spec)
 
         def undo():
             self.app.model.remove_annotation(page_uid, new_spec.uid)
-            self.app.model.add_annotation(page_uid, spec)
-        from .undo_stack import Command
-        self.app.undo_stack.push(Command("Skift farve", do, undo))
+            self.app.model.add_annotation(page_uid, old_spec)
+
+        self.app.undo_stack.push(Command(label, do, undo))
         self._sel = (page_uid, new_spec.uid)
-        self._draw_overlays()
-        return True
+        self.viewport().update()
 
-    def zoom_in(self):
-        self._set_zoom(self._next_zoom(1))
-
-    def zoom_out(self):
-        self._set_zoom(self._next_zoom(-1))
-
-    def set_zoom_percent(self, pct):
-        try:
-            z = max(ZOOM_MIN, min(ZOOM_MAX, float(pct) / 100.0))
-        except (TypeError, ValueError):
-            return
-        self._set_zoom(z)
-
-    def zoom_percent(self):
-        return int(round(self.zoom * 100))
-
-    def current_page_uid(self):
-        """Page whose top is nearest the viewport top (for toolbar rotate)."""
-        if not self.pages:
-            return None
-        top = self.canvas.canvasy(0)
-        best = self.pages[0]
-        for p in self.pages:
-            if p["y"] <= top + 40:
-                best = p
-            else:
-                break
-        return best["uid"]
-
-    def delete_selected(self):
-        if not self._sel:
-            return "break"
-        page_uid, annot_uid = self._sel
-        found = self.app.model.page_by_uid(page_uid)
-        if found:
-            _, page = found
-            spec = next((a for a in page.annots if a.uid == annot_uid), None)
-            if spec is not None:
-                self.app.undo_stack.push(
-                    em.remove_annotation_cmd(self.app.model, page_uid, spec))
-        self._clear_selection()
-        self._draw_overlays()
-        return "break"
-
-    # --------------------------------------------------------------- build/layout
-    def set_document(self):
-        """(Re)load geometry for every page in the model, then lay out + render."""
+    # -------------------------------------------------------- dokument/layout
+    def set_document(self) -> None:
+        """Genindlaes geometrien for hver side i modellen, layout derefter."""
         self._gen += 1
         gen = self._gen
         pairs = self.app.model.flatten()
-        # Snapshot for the worker (paths + indices), grouped by nothing fancy.
-        # src_path pr. SIDE (ikke f.path): indsatte sider peger på deres egen
-        # genererede PDF. Kind udledes derfor også af sidens sti.
+        # src_path pr. SIDE (ikke entry.path): indsatte sider peger paa deres
+        # egen genererede PDF. Kind udledes derfor ogsaa af sidens sti.
         snap = [(f.iid, p.uid, em.kind_for_path(p.src_path), p.src_path, p.src_index)
                 for (f, p) in pairs]
-        pw = self.app._get_all_passwords()
-        threading.Thread(target=self._geometry_worker, args=(gen, snap, pw),
-                         daemon=True).start()
+        qt_util.run_in_thread(self._geometry_worker, gen, snap,
+                              self.app._get_all_passwords(), name="page-geometry")
 
-    # keep old name used by PageView
-    def rebuild(self):
+    def rebuild(self) -> None:
         self.set_document()
 
-    def _geometry_worker(self, gen, snap, pw):
+    def _geometry_worker(self, gen, snap, pw) -> None:
         geom = {}
-        for iid, uid, kind, path, idx in snap:
+        for _iid, uid, kind, path, idx in snap:
             if kind == em.KIND_PDF:
                 g = pdf_renderer.page_geometry(path, pw, idx)
-                if g:
-                    r0, dw, dh = g
-                    geom[uid] = ("pdf", r0, dw, dh)
-                else:
-                    geom[uid] = ("pdf", 0, 595.0, 842.0)
+                geom[uid] = ("pdf", *g) if g else ("pdf", 0, 595.0, 842.0)
             else:
                 try:
                     from PIL import Image
@@ -267,48 +279,37 @@ class PageCanvas(ttk.Frame):
                     geom[uid] = ("image", 0, 595.0, 842.0)
         self.app._queue.put((self._on_geometry_ready, (gen, geom)))
 
-    def _on_geometry_ready(self, gen, geom):
+    def _on_geometry_ready(self, gen, geom) -> None:
         if gen != self._gen:
             return
         self.geom = geom
-        # Default zoom: fit the first page's width to the viewport, once.
+        # Standardzoom: tilpas foerste sides bredde til udsnittet, én gang.
         if not self.pages and self.app.model.files:
             self._fit_width_pending = True
         self._compute_layout()
         self._refresh_visible()
 
-    def _compute_layout(self):
+    def _compute_layout(self) -> None:
         self.pages = []
         self.by_uid = {}
-        cw = max(1, self.canvas.winfo_width())
+        cw = max(1, self.viewport().width())
         pairs = self.app.model.flatten()
 
-        # optional one-time fit-to-width using the first page
-        if getattr(self, "_fit_width_pending", False) and pairs and self.geom:
-            first_uid = pairs[0][1].uid
-            g = self.geom.get(first_uid)
+        if self._fit_width_pending and pairs and self.geom:
+            g = self.geom.get(pairs[0][1].uid)
             if g:
-                # NB: ikke '_' som kastevariabel -- det binder gettext-'_' som
-                # funktions-lokal og faar tom-tilstandens _("...") nedenfor til at
-                # kaste UnboundLocalError.
                 _kind0, r0, dw, dh = g
                 shown_w = dh if (r0 % 180 == 90) else dw
                 if shown_w > 0:
                     self.zoom = max(ZOOM_MIN, min(ZOOM_MAX, (cw - 2 * MARGIN) / shown_w))
             self._fit_width_pending = False
-            if self.on_zoom_change:
-                self.on_zoom_change(self.zoom_percent())
+            self.zoom_changed.emit(self.zoom_percent())
 
         y = MARGIN
         maxw = cw
         for entry, page in pairs:
-            g = self.geom.get(page.uid, ("pdf", 0, 595.0, 842.0))
-            _kind, r0, dw, dh = g
-            # unrotated dims
-            if r0 % 180 == 90:
-                uw, uh = dh, dw
-            else:
-                uw, uh = dw, dh
+            kind, r0, dw, dh = self.geom.get(page.uid, ("pdf", 0, 595.0, 842.0))
+            uw, uh = (dh, dw) if r0 % 180 == 90 else (dw, dh)
             total = (r0 + page.rotation) % 360
             # Er siden beskaaret, er det cropens maal der vises -- ikke sidens.
             crop = page.crop
@@ -317,43 +318,62 @@ class PageCanvas(ttk.Frame):
                 ch_pts = max(1.0, float(crop[3]) - float(crop[1]))
             else:
                 cw_pts, ch_pts = uw, uh
-            if total % 180 == 90:
-                shown_w_pts, shown_h_pts = ch_pts, cw_pts
-            else:
-                shown_w_pts, shown_h_pts = cw_pts, ch_pts
+            shown_w_pts, shown_h_pts = ((ch_pts, cw_pts) if total % 180 == 90
+                                        else (cw_pts, ch_pts))
             w = max(1, int(round(shown_w_pts * self.zoom)))
             h = max(1, int(round(shown_h_pts * self.zoom)))
             x = max(MARGIN, (cw - w) // 2)
-            vt = ViewTransform(uw, uh, total, self.zoom, x, y, crop=crop)
             rec = {"entry": entry, "page": page, "uid": page.uid,
-                   "x": x, "y": y, "w": w, "h": h, "vt": vt, "kind": _kind}
+                   "x": x, "y": y, "w": w, "h": h, "kind": kind,
+                   "vt": ViewTransform(uw, uh, total, self.zoom, x, y, crop=crop)}
             self.pages.append(rec)
             self.by_uid[page.uid] = rec
             maxw = max(maxw, w + 2 * MARGIN)
             y += h + PAGE_GAP
         self.total_w = maxw
         self.total_h = y + MARGIN
-        self.canvas.configure(scrollregion=(0, 0, self.total_w, self.total_h))
-        # keep placed set but force re-place at new geometry/zoom
-        self._placed = {}
-        self._photos = {}
-        self.canvas.delete("all")
-        if not self.pages:
-            self.canvas.create_text(MARGIN, MARGIN, anchor="nw", fill=_EMPTY_FG,
-                                    text=_("Ingen sider at vise. Tilføj filer."))
+        # Ved ny zoom/geometri skal alle billeder bestilles igen i den nye stoerrelse.
+        self._pix.clear()
+        self._requested.clear()
+        self._sync_scrollbars()
 
-    # --------------------------------------------------------------- rendering
-    def _visible_span(self, buffer=None):
-        h = self.canvas.winfo_height()
+    def _sync_scrollbars(self) -> None:
+        vp = self.viewport()
+        vsb, hsb = self.verticalScrollBar(), self.horizontalScrollBar()
+        vsb.setPageStep(max(1, vp.height()))
+        vsb.setRange(0, max(0, self.total_h - vp.height()))
+        hsb.setPageStep(max(1, vp.width()))
+        hsb.setRange(0, max(0, self.total_w - vp.width()))
+
+    def resizeEvent(self, event):  # noqa: N802 - Qt-API
+        super().resizeEvent(event)
+        self._layout_timer.start(120)
+
+    def _relayout(self) -> None:
+        if self.pages or self.geom:
+            self._compute_layout()
+            self._refresh_visible()
+
+    # ---------------------------------------------------------- rendering
+    def _origin(self) -> QPoint:
+        return QPoint(self.horizontalScrollBar().value(),
+                      self.verticalScrollBar().value())
+
+    def _visible_span(self, buffer: int | None = None):
+        h = self.viewport().height()
+        top = self.verticalScrollBar().value()
         if buffer is None:
             buffer = h
-        top = self.canvas.canvasy(0) - buffer
-        bottom = self.canvas.canvasy(0) + h + buffer
-        return top, bottom
+        return top - buffer, top + h + buffer
 
-    def _refresh_visible(self):
-        self._render_after = None
+    def _on_scrolled(self) -> None:
+        self.rmgr.notify_activity()
+        self.viewport().update()
+        self._render_timer.start(30)
+
+    def _refresh_visible(self) -> None:
         if not self.pages:
+            self.viewport().update()
             return
         top, bottom = self._visible_span()
         pw = self.app._get_all_passwords()
@@ -361,451 +381,573 @@ class PageCanvas(ttk.Frame):
         for rec in self.pages:
             if rec["y"] + rec["h"] < top or rec["y"] > bottom:
                 continue
-            if rec["uid"] in self._placed:
+            uid = rec["uid"]
+            if uid in self._requested:
                 continue
-            self._placed[rec["uid"]] = True
+            self._requested.add(uid)
             page = rec["page"]
             box = (rec["w"], rec["h"])
             cached = self.rmgr.cache.get(page_render.cache_key(
                 page.src_path, page.src_index, page.rotation, box, page.crop))
             if cached is not None:
-                self._set_page_image(rec["uid"], cached)
+                self._pix[uid] = icons_vector.pil_to_qpixmap(cached)
             else:
-                # page frame placeholder while it renders
-                self.canvas.create_rectangle(
-                    rec["x"], rec["y"], rec["x"] + rec["w"], rec["y"] + rec["h"],
-                    fill=_PAPER, outline=_PAGE_SHADOW, tags=("pageframe", "p:" + rec["uid"]))
-                self.rmgr.request(rec["uid"], page.src_path, pw, page.src_index,
+                self.rmgr.request(uid, page.src_path, pw, page.src_index,
                                   page.rotation, box, self._on_page_ready,
                                   priority=1, generation=gen, crop=page.crop)
-        self._draw_overlays()
+        self.viewport().update()
         self._notify_page()
 
-    def _notify_page(self):
-        if getattr(self, "_suppress_notify", False):
+    def _on_page_ready(self, uid, pil) -> None:
+        if uid not in self.by_uid or pil is None:
+            return
+        self._pix[uid] = icons_vector.pil_to_qpixmap(pil)
+        self.viewport().update()
+
+    def _notify_page(self) -> None:
+        if self._suppress_notify:
             return
         cur = self.current_page_uid()
         if cur is not None and cur != self._last_page:
             self._last_page = cur
-            if self.on_page_change:
-                self.on_page_change(cur)
+            self.page_changed.emit(cur)
 
-    def _on_page_ready(self, uid, pil):
-        if uid not in self.by_uid or pil is None:
-            return
-        self._set_page_image(uid, pil)
-        self._draw_overlays()
-
-    def _set_page_image(self, uid, pil):
-        rec = self.by_uid.get(uid)
-        if rec is None:
-            return
-        try:
-            photo = ImageTk.PhotoImage(pil)
-        except Exception:
-            return
-        self._photos[uid] = photo
-        self.canvas.delete("p:" + uid)
-        self.canvas.create_image(rec["x"], rec["y"], anchor="nw", image=photo,
-                                 tags=("pageimg", "p:" + uid))
-
-    # --------------------------------------------------------------- overlays
     def _page_words(self, rec):
+        """Sidens ord. Billeder har intet tekstlag -- de faar kun ord via OCR."""
         uid = rec["uid"]
         if uid not in self.words:
-            self.words[uid] = pdf_renderer.page_words(
-                rec["page"].src_path, self.app._get_all_passwords(), rec["page"].src_index)
+            page = rec["page"]
+            self.words[uid] = (
+                pdf_renderer.page_words(page.src_path,
+                                        self.app._get_all_passwords(),
+                                        page.src_index)
+                if rec["kind"] == "pdf" else [])
         return self.words[uid]
 
-    def _spec_hex(self, spec):
-        return "#%02x%02x%02x" % tuple(
-            int(round(max(0.0, min(1.0, c)) * 255)) for c in spec.color)
+    # ---------------------------------------------------- ord og tekstlinjer
+    # Scannede sider har intet tekstlag. Tekstvaerktoejerne kan derfor ikke ramme
+    # noget paa dem, foer brugeren har koert **Tekstgenkendelse** (knappen i
+    # vaerktoejslinjen). Fremviseren OCR'er ikke af sig selv: en stille koersel paa
+    # "den side man staar paa" gav ingen forklaring paa hvorfor markeringen
+    # virkede paa én side og ikke paa den naeste.
 
-    def _draw_overlays(self):
-        self.canvas.delete("anno")
-        self.canvas.delete("selbox")
-        top, bottom = self._visible_span(buffer=self.canvas.winfo_height())
+    @staticmethod
+    def _word_chars(words) -> int:
+        return sum(len(w[4].strip()) for w in words)
+
+    def has_text(self, rec) -> bool:
+        """Er der ord at markere paa siden?"""
+        return self._word_chars(self._page_words(rec)) > 0
+
+    def apply_ocr_words(self, by_uid: dict) -> None:
+        """Tag imod ordlister fra en tekstgenkendelse. Kun UI-traaden."""
+        for uid, words in by_uid.items():
+            if words:
+                self.words[uid] = words
+        self.viewport().update()
+
+    def _hint_no_text(self) -> None:
+        self.app.set_status(
+            _("Siden har ingen tekst at markere — kør Tekstgenkendelse først"),
+            transient_ms=8000, kind="warning")
+
+    def _visual_lines(self, rec) -> list:
+        """Ordene grupperet i de linjer **brugeren ser**, i laeserraekkefoelge.
+
+        Grupperingen sker i canvas-rummet, ikke i A-space: paa en roteret side er
+        en tekstlinje kun vandret paa skaermen. To ord hoerer til samme linje naar
+        deres lodrette udstraekning overlapper med over halvdelen af den mindste
+        hoejde -- et forhold, ikke en fast tolerance, saa OCR'ens ujaevne
+        ord-rammer ikke river en linje i stykker.
+        """
+        vt = rec["vt"]
+        items = []
+        for w in self._page_words(rec):
+            if not w[4].strip():
+                continue
+            x0, y0 = vt.pdf_to_canvas(w[0], w[1])
+            x1, y1 = vt.pdf_to_canvas(w[2], w[3])
+            items.append((QRectF(min(x0, x1), min(y0, y1),
+                                 max(1.0, abs(x1 - x0)), max(1.0, abs(y1 - y0))), w))
+        items.sort(key=lambda it: (it[0].center().y(), it[0].left()))
+
+        lines = []
+        for box, w in items:
+            cur = lines[-1] if lines else None
+            if cur is not None:
+                overlap = (min(cur["bottom"], box.bottom())
+                           - max(cur["top"], box.top()))
+                if overlap > 0.5 * min(box.height(), cur["bottom"] - cur["top"]):
+                    cur["words"].append((box, w))
+                    cur["top"] = min(cur["top"], box.top())
+                    cur["bottom"] = max(cur["bottom"], box.bottom())
+                    continue
+            lines.append({"top": box.top(), "bottom": box.bottom(),
+                          "words": [(box, w)]})
+        for line in lines:
+            line["words"].sort(key=lambda it: it[0].left())
+        return lines
+
+    @staticmethod
+    def _locate(lines, x: float, y: float) -> tuple:
+        """(linje, ord) taettest paa punktet. Uden for siden klemmes der ind."""
+        best_i, best_d = 0, None
+        for i, line in enumerate(lines):
+            if line["top"] <= y <= line["bottom"]:
+                best_i = i
+                break
+            d = line["top"] - y if y < line["top"] else y - line["bottom"]
+            if best_d is None or d < best_d:
+                best_i, best_d = i, d
+        words = lines[best_i]["words"]
+        best_j, best_dx = 0, None
+        for j, (box, _w) in enumerate(words):
+            if box.left() <= x <= box.right():
+                return best_i, j
+            dx = box.left() - x if x < box.left() else x - box.right()
+            if best_dx is None or dx < best_dx:
+                best_j, best_dx = j, dx
+        return best_i, best_j
+
+    def _line_runs(self, lines, p0, p1) -> list:
+        """Ordene mellem to punkter -- ét sammenhaengende loeb **pr. linje**.
+
+        Det er dét der goer markeringen til en tekstmarkering og ikke en ramme:
+        en vandret bevaegelse rammer kun den linje markoeren er paa, og et traek
+        ned tager resten af den foerste linje, hele de mellemliggende og
+        begyndelsen af den sidste -- som i enhver anden laeser.
+        """
+        i0, j0 = self._locate(lines, *p0)
+        i1, j1 = self._locate(lines, *p1)
+        if (i0, j0) > (i1, j1):
+            (i0, j0), (i1, j1) = (i1, j1), (i0, j0)
+        runs = []
+        for i in range(i0, i1 + 1):
+            words = lines[i]["words"]
+            a = j0 if i == i0 else 0
+            b = j1 if i == i1 else len(words) - 1
+            run = words[a:b + 1]
+            if run:
+                runs.append(run)
+        return runs
+
+    # ------------------------------------------------------------- maling
+    def paintEvent(self, event):  # noqa: N802 - Qt-API
+        p = QPainter(self.viewport())
+        p.fillRect(self.viewport().rect(), QColor(theme.C["page_gutter"]))
+        if not self.pages:
+            p.setPen(QColor(theme.C["page_gutter_fg"]))
+            p.setFont(theme.font("base"))
+            p.drawText(QRect(MARGIN, MARGIN, self.viewport().width() - 2 * MARGIN, 40),
+                       Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+                       _("Ingen sider at vise. Tilføj filer."))
+            p.end()
+            return
+
+        o = self._origin()
+        p.translate(-o.x(), -o.y())
+        p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        top, bottom = self._visible_span(buffer=self.viewport().height())
+
         for rec in self.pages:
             if rec["y"] + rec["h"] < top or rec["y"] > bottom:
                 continue
-            found = self.app.model.page_by_uid(rec["uid"])
-            if not found:
-                continue
-            _, page = found
-            for spec in page.annots:
-                try:
-                    self._draw_spec(rec, spec)
-                except Exception as e:
-                    logger.debug("overlay %s: %s", spec.kind, e)
-        # staaende tekstmarkering (markoer-vaerktoejet)
-        self.canvas.delete("selrect")
-        sel = self._text_selection
-        if sel:
-            rec = self.by_uid.get(sel["page_uid"])
-            if rec is not None:
-                vt = rec["vt"]
-                for r in sel["rects"]:
-                    x0, y0 = vt.pdf_to_canvas(r[0], r[1])
-                    x1, y1 = vt.pdf_to_canvas(r[2], r[3])
-                    self.canvas.create_rectangle(min(x0, x1), min(y0, y1),
-                                                 max(x0, x1), max(y0, y1),
-                                                 fill=_TEXTSEL, stipple="gray50",
-                                                 outline="", tags=("selrect",))
-        # selection box
-        if self._sel:
-            bbox = self._annot_bbox(*self._sel)
-            if bbox:
-                self.canvas.create_rectangle(*bbox, outline=_SEL_OUTLINE, width=2,
-                                             dash=(4, 3), tags=("selbox",))
+            r = QRect(rec["x"], rec["y"], rec["w"], rec["h"])
+            pm = self._pix.get(rec["uid"])
+            if pm is not None and not pm.isNull():
+                p.drawPixmap(r, pm)
+            else:
+                # Hvidt papir med en diskret skygge mens siden renderes.
+                p.fillRect(r, QColor(theme.C["paper"]))
+                p.setPen(QPen(QColor(theme.C["page_shadow"]), 1))
+                p.drawRect(r)
+            self._paint_annotations(p, rec)
 
-    def _draw_spec(self, rec, spec):
+        self._paint_text_selection(p)
+        self._paint_selection_box(p)
+        self._paint_wip(p)
+        p.end()
+
+    def _paint_annotations(self, p: QPainter, rec) -> None:
+        found = self.app.model.page_by_uid(rec["uid"])
+        if not found:
+            return
+        _entry, page = found
+        for spec in page.annots:
+            try:
+                self._paint_spec(p, rec, spec)
+            except Exception as e:
+                logger.debug("overlay %s: %s", spec.kind, e)
+
+    def _paint_spec(self, p: QPainter, rec, spec) -> None:
         vt = rec["vt"]
-        c = self.canvas
-        col = self._spec_hex(spec)
+        col = _qcolor(spec.color)
         kind = spec.kind
-        tag = ("anno", "a:%s:%s" % (rec["uid"], spec.uid))
+        pen = QPen(col, max(1.0, float(spec.width or 1.0)))
+        pen.setCosmetic(True)
+
+        def crect(r) -> QRectF:
+            x0, y0 = vt.pdf_to_canvas(r[0], r[1])
+            x1, y1 = vt.pdf_to_canvas(r[2], r[3])
+            return QRectF(min(x0, x1), min(y0, y1), abs(x1 - x0), abs(y1 - y0))
+
         if kind == "redact":
             # En maskering kan daekke FLERE rects (ord-maskering markerer flere
             # ord i én spec). Tegn dem alle -- ellers ser man kun det foerste ord
             # maskeret i preview, selv om gem korrekt masker alle.
+            fill = QColor(theme.C["redact_bar"])
+            fill.setAlpha(190)
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(fill)
             for r in spec.rects:
-                cx0, cy0 = vt.pdf_to_canvas(r[0], r[1])
-                cx1, cy1 = vt.pdf_to_canvas(r[2], r[3])
-                c.create_rectangle(cx0, cy0, cx1, cy1, fill=_REDACT,
-                                   outline=_REDACT, stipple="gray50", tags=tag)
+                p.drawRect(crect(r))
+            p.setBrush(Qt.BrushStyle.NoBrush)
         elif kind in ("rect", "freetext"):
-            x0, y0, x1, y1 = spec.rects[0]
-            cx0, cy0 = vt.pdf_to_canvas(x0, y0)
-            cx1, cy1 = vt.pdf_to_canvas(x1, y1)
-            c.create_rectangle(cx0, cy0, cx1, cy1, outline=col,
-                               width=_lw(spec.width), tags=tag)
+            rr = crect(spec.rects[0])
+            p.setPen(pen)
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            p.drawRect(rr)
             if kind == "freetext" and spec.text:
-                c.create_text(min(cx0, cx1) + 3, min(cy0, cy1) + 2, anchor="nw",
-                              text=spec.text, fill=col,
-                              width=max(10, int(abs(cx1 - cx0)) - 6), tags=tag)
+                f = QFont(theme.font("base"))
+                f.setPointSizeF(max(6.0, float(spec.fontsize or 11.0) * self.zoom * 0.75))
+                p.setFont(f)
+                p.drawText(rr.adjusted(3, 2, -3, -2),
+                           int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
+                           | int(Qt.TextFlag.TextWordWrap), spec.text)
         elif kind == "circle":
-            x0, y0, x1, y1 = spec.rects[0]
-            cx0, cy0 = vt.pdf_to_canvas(x0, y0)
-            cx1, cy1 = vt.pdf_to_canvas(x1, y1)
-            c.create_oval(cx0, cy0, cx1, cy1, outline=col, width=_lw(spec.width), tags=tag)
+            p.setPen(pen)
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            p.drawEllipse(crect(spec.rects[0]))
         elif kind == "line":
             x0, y0, x1, y1 = spec.rects[0]
             cx0, cy0 = vt.pdf_to_canvas(x0, y0)
             cx1, cy1 = vt.pdf_to_canvas(x1, y1)
-            c.create_line(cx0, cy0, cx1, cy1, fill=col, width=_lw(spec.width), tags=tag)
+            p.setPen(pen)
+            p.drawLine(int(cx0), int(cy0), int(cx1), int(cy1))
         elif kind == "ink":
+            p.setPen(pen)
             for stroke in spec.strokes:
-                pts = []
-                for (x, y) in stroke:
-                    pts.extend(vt.pdf_to_canvas(x, y))
-                if len(pts) >= 4:
-                    c.create_line(*pts, fill=col, width=_lw(spec.width),
-                                  smooth=True, tags=tag)
+                pts = [vt.pdf_to_canvas(x, y) for (x, y) in stroke]
+                for i in range(1, len(pts)):
+                    p.drawLine(int(pts[i - 1][0]), int(pts[i - 1][1]),
+                               int(pts[i][0]), int(pts[i][1]))
         elif kind in ("highlight", "underline", "strikeout"):
             for r in spec.rects:
-                x0, y0, x1, y1 = r
-                cx0, cy0 = vt.pdf_to_canvas(x0, y0)
-                cx1, cy1 = vt.pdf_to_canvas(x1, y1)
+                rr = crect(r)
                 if kind == "highlight":
-                    c.create_rectangle(cx0, cy0, cx1, cy1, outline="", fill=col,
-                                       stipple="gray50", tags=tag)
+                    # Ægte alfa frem for Tk's "gray50"-stipple: fremhaevningen
+                    # ser ud som i en PDF-laeser, og teksten under kan laeses.
+                    p.setPen(Qt.PenStyle.NoPen)
+                    p.setBrush(_qcolor(spec.color, 90))
+                    p.drawRect(rr)
+                    p.setBrush(Qt.BrushStyle.NoBrush)
                 else:
-                    yy = max(cy0, cy1) if kind == "underline" else (cy0 + cy1) / 2
-                    c.create_line(cx0, yy, cx1, yy, fill=col, width=2, tags=tag)
+                    yy = rr.bottom() if kind == "underline" else rr.center().y()
+                    p.setPen(QPen(col, 2))
+                    p.drawLine(int(rr.left()), int(yy), int(rr.right()), int(yy))
 
-    def _annot_bbox(self, page_uid, annot_uid):
-        items = self.canvas.find_withtag("a:%s:%s" % (page_uid, annot_uid))
-        if not items:
-            return None
-        x0 = y0 = 1e18
-        x1 = y1 = -1e18
-        for it in items:
-            bx = self.canvas.bbox(it)
-            if bx:
-                x0 = min(x0, bx[0]); y0 = min(y0, bx[1])
-                x1 = max(x1, bx[2]); y1 = max(y1, bx[3])
-        if x1 < x0:
-            return None
-        return (x0 - 3, y0 - 3, x1 + 3, y1 + 3)
+    def _paint_text_selection(self, p: QPainter) -> None:
+        sel = self._text_selection
+        rects = None
+        if self._draw and self._draw.get("mode") == "text":
+            rects = [(r, self._draw["rec"]) for r, _w in self._draw.get("hits", [])]
+        elif sel:
+            rec = self.by_uid.get(sel["page_uid"])
+            if rec is not None:
+                rects = [(r, rec) for r in sel["rects"]]
+        if not rects:
+            return
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QColor(theme.C["selection"]).lighter(120))
+        p.setOpacity(0.35)
+        for r, rec in rects:
+            vt = rec["vt"]
+            x0, y0 = vt.pdf_to_canvas(r[0], r[1])
+            x1, y1 = vt.pdf_to_canvas(r[2], r[3])
+            p.drawRect(QRectF(min(x0, x1), min(y0, y1), abs(x1 - x0), abs(y1 - y0)))
+        p.setOpacity(1.0)
+        p.setBrush(Qt.BrushStyle.NoBrush)
 
-    # --------------------------------------------------------------- hit-testing
+    def _paint_selection_box(self, p: QPainter) -> None:
+        if not self._sel:
+            return
+        box = self._annot_bbox(*self._sel)
+        if box is None:
+            return
+        pen = QPen(QColor(theme.C["accent"]), 2, Qt.PenStyle.DashLine)
+        p.setPen(pen)
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.drawRect(box.adjusted(-3, -3, 3, 3))
+
+    def _paint_wip(self, p: QPainter) -> None:
+        """Gummibaandet under en igangvaerende tegne-gestus."""
+        d = self._draw
+        if not d or d.get("mode") != "shape":
+            return
+        tool = self.active_tool
+        x0, y0 = d["x0"], d["y0"]
+        x1, y1 = d.get("x1", x0), d.get("y1", y0)
+        col = (QColor(theme.C["accent"]) if tool == "crop" else _qcolor(self.color))
+        pen = QPen(col, 2)
+        if tool == "crop":
+            pen.setStyle(Qt.PenStyle.DashLine)
+        p.setPen(pen)
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        if tool == "ink":
+            pts = d.get("pts", [])
+            for i in range(1, len(pts)):
+                p.drawLine(int(pts[i - 1][0]), int(pts[i - 1][1]),
+                           int(pts[i][0]), int(pts[i][1]))
+        elif tool == "line":
+            p.drawLine(int(x0), int(y0), int(x1), int(y1))
+        elif tool == "circle":
+            p.drawEllipse(QRectF(min(x0, x1), min(y0, y1), abs(x1 - x0), abs(y1 - y0)))
+        else:
+            p.drawRect(QRectF(min(x0, x1), min(y0, y1), abs(x1 - x0), abs(y1 - y0)))
+
+    # ------------------------------------------------------------ hit-test
+    def _annot_bbox(self, page_uid, annot_uid) -> QRectF | None:
+        """Annotationens omsluttende rektangel i laerreds-koordinater.
+
+        Regnes ud af specen, ikke af tegnede items -- derfor er den korrekt
+        allerede foer foerste maling og kan ikke pege paa et forældet item."""
+        rec = self.by_uid.get(page_uid)
+        if rec is None:
+            return None
+        found = self.app.model.page_by_uid(page_uid)
+        if not found:
+            return None
+        _entry, page = found
+        spec = next((a for a in page.annots if a.uid == annot_uid), None)
+        if spec is None:
+            return None
+        return self._spec_bbox(rec, spec)
+
+    @staticmethod
+    def _spec_bbox(rec, spec) -> QRectF | None:
+        vt = rec["vt"]
+        xs, ys = [], []
+        for r in (spec.rects or ()):
+            for (px, py) in ((r[0], r[1]), (r[2], r[3])):
+                cx, cy = vt.pdf_to_canvas(px, py)
+                xs.append(cx)
+                ys.append(cy)
+        for stroke in (spec.strokes or ()):
+            for (px, py) in stroke:
+                cx, cy = vt.pdf_to_canvas(px, py)
+                xs.append(cx)
+                ys.append(cy)
+        if not xs:
+            return None
+        return QRectF(min(xs), min(ys), max(1.0, max(xs) - min(xs)),
+                      max(1.0, max(ys) - min(ys)))
+
     def _page_at(self, cx, cy):
         for rec in self.pages:
-            if rec["x"] <= cx <= rec["x"] + rec["w"] and rec["y"] <= cy <= rec["y"] + rec["h"]:
+            if (rec["x"] <= cx <= rec["x"] + rec["w"]
+                    and rec["y"] <= cy <= rec["y"] + rec["h"]):
                 return rec
         return None
 
     def _annot_at(self, cx, cy):
-        """Bbox-based hit test (topmost first) so clicking inside an unfilled
-        shape still selects it."""
-        for it in reversed(self.canvas.find_withtag("anno")):
-            bx = self.canvas.bbox(it)
-            if bx and bx[0] - 3 <= cx <= bx[2] + 3 and bx[1] - 3 <= cy <= bx[3] + 3:
-                for t in self.canvas.gettags(it):
-                    if t.startswith("a:"):
-                        _, page_uid, annot_uid = t.split(":", 2)
-                        return (page_uid, annot_uid)
+        """Bbox-baseret hit-test (oeverste foerst), saa et klik inde i en
+        ufyldt figur stadig vaelger den."""
+        for rec in reversed(self.pages):
+            found = self.app.model.page_by_uid(rec["uid"])
+            if not found:
+                continue
+            _entry, page = found
+            for spec in reversed(page.annots):
+                box = self._spec_bbox(rec, spec)
+                if box is not None and box.adjusted(-3, -3, 3, 3).contains(cx, cy):
+                    return (rec["uid"], spec.uid)
         return None
 
-    # --------------------------------------------------------------- mouse
+    # --------------------------------------------------------------- mus
     def _cxy(self, event):
-        return self.canvas.canvasx(event.x), self.canvas.canvasy(event.y)
+        o = self._origin()
+        pos = event.position().toPoint()
+        return pos.x() + o.x(), pos.y() + o.y()
 
-    def _on_press(self, event):
-        self.canvas.focus_set()
+    def _apply_cursor(self) -> None:
+        # Tekstvaerktoejerne (fremhaev/understreg/gennemstreg/masker ord) markerer
+        # ORD, ikke et frit areal, saa de skal have samme I-bjaelke som markoeren.
+        # Krydset lovede en frihaandsramme og var derfor misvisende.
+        if self.active_tool == "hand":
+            shape = Qt.CursorShape.OpenHandCursor
+        elif self.active_tool == "select" or self.active_tool in _TEXT_TOOLS:
+            shape = Qt.CursorShape.IBeamCursor
+        else:
+            shape = Qt.CursorShape.CrossCursor
+        self.viewport().setCursor(QCursor(shape))
+
+    def mousePressEvent(self, event):  # noqa: N802 - Qt-API
+        self.setFocus()
+        if event.button() != Qt.MouseButton.LeftButton:
+            return super().mousePressEvent(event)
         cx, cy = self._cxy(event)
         tool = self.active_tool
         if tool == "hand":
             self._clear_selection()
-            self.canvas.scan_mark(event.x, event.y)
-            self._draw = {"mode": "pan"}
+            self._draw = {"mode": "pan", "origin": event.position().toPoint(),
+                          "scroll": (self.horizontalScrollBar().value(),
+                                     self.verticalScrollBar().value())}
+            self.viewport().setCursor(QCursor(Qt.CursorShape.ClosedHandCursor))
             return
         if tool == "select":
-            # Markoer-vaerktoejet: rammer klikket en annotation, vaelges den; ellers
-            # begynder en TEKST-markering. Musemarkering af tekst laa i den gamle
-            # enkeltside-fremviser og faldt paa gulvet da den kontinuerlige
-            # fremviser afloeste den -- kun det ubrugte ``_text_selection``-felt
-            # blev tilbage.
+            # Markoer-vaerktoejet: rammer klikket en annotation, vaelges den;
+            # ellers begynder en TEKST-markering.
             hit = self._annot_at(cx, cy)
             self._clear_text_selection()
             if hit:
                 self._sel = hit
                 self._draw = None
-                self._draw_overlays()
+                self.viewport().update()
                 return
             self._sel = None
             rec = self._page_at(cx, cy)
-            if rec is None:
-                self._draw = None
-                self._draw_overlays()
-                return
-            self._draw = {"mode": "text", "rec": rec, "x0": cx, "y0": cy, "hits": []}
+            if rec is not None and not self.has_text(rec):
+                self._hint_no_text()
+            self._draw = ({"mode": "text", "rec": rec, "x0": cx, "y0": cy, "hits": []}
+                          if rec is not None else None)
+            self.viewport().update()
             return
         rec = self._page_at(cx, cy)
         if rec is None:
             self._draw = None
             return
         if tool in _TEXT_TOOLS:
+            if not self.has_text(rec):
+                self._hint_no_text()
             self._draw = {"mode": "text", "rec": rec, "x0": cx, "y0": cy, "hits": []}
         else:
             self._draw = {"mode": "shape", "rec": rec, "x0": cx, "y0": cy,
-                          "item": None, "pts": [(cx, cy)]}
+                          "x1": cx, "y1": cy, "pts": [(cx, cy)]}
 
-    def _on_motion(self, event):
+    def mouseMoveEvent(self, event):  # noqa: N802 - Qt-API
         if not self._draw:
-            return
+            return super().mouseMoveEvent(event)
         mode = self._draw["mode"]
         if mode == "pan":
-            self.canvas.scan_dragto(event.x, event.y, gain=1)
-            self._draw_overlays()
+            delta = event.position().toPoint() - self._draw["origin"]
+            sx, sy = self._draw["scroll"]
+            self.horizontalScrollBar().setValue(sx - delta.x())
+            self.verticalScrollBar().setValue(sy - delta.y())
             return
         cx, cy = self._cxy(event)
         if mode == "text":
             self._update_text_sel(cx, cy)
             return
-        rec = self._draw["rec"]
-        col = self._hex(self.color)
-        c = self.canvas
-        tool = self.active_tool
-        if tool == "ink":
+        self._draw["x1"], self._draw["y1"] = cx, cy
+        if self.active_tool == "ink":
             self._draw["pts"].append((cx, cy))
-            px, py = self._draw["pts"][-2]
-            c.create_line(px, py, cx, cy, fill=col, width=2, tags=("wip",))
-            return
-        if self._draw["item"] is not None:
-            c.delete(self._draw["item"])
-        x0, y0 = self._draw["x0"], self._draw["y0"]
-        if tool == "line":
-            self._draw["item"] = c.create_line(x0, y0, cx, cy, fill=col, width=2, tags=("wip",))
-        elif tool == "circle":
-            self._draw["item"] = c.create_oval(x0, y0, cx, cy, outline=col, width=2, tags=("wip",))
-        elif tool == "crop":
-            self._draw["item"] = c.create_rectangle(
-                x0, y0, cx, cy, outline=_CROP_LINE, width=2, dash=(4, 3), tags=("wip",))
-        else:
-            self._draw["item"] = c.create_rectangle(x0, y0, cx, cy, outline=col, width=2, tags=("wip",))
+        self.viewport().update()
 
-    def _update_text_sel(self, cx, cy):
-        rec = self._draw["rec"]
-        vt = rec["vt"]
-        sel = pymupdf.Rect(*vt.rect_from_canvas(self._draw["x0"], self._draw["y0"], cx, cy))
-        hits = []
-        self.canvas.delete("selrect")
-        for w in self._page_words(rec):
-            wr = pymupdf.Rect(w[0], w[1], w[2], w[3])
-            if wr.intersects(sel):
-                r = (float(w[0]), float(w[1]), float(w[2]), float(w[3]))
-                hits.append((r, w[4]))
-                cx0, cy0 = vt.pdf_to_canvas(r[0], r[1])
-                cx1, cy1 = vt.pdf_to_canvas(r[2], r[3])
-                self.canvas.create_rectangle(cx0, cy0, cx1, cy1, outline="",
-                                             fill=_TEXTSEL, stipple="gray50",
-                                             tags=("selrect", "wip"))
-        self._draw["hits"] = hits
+    def _update_text_sel(self, cx, cy) -> None:
+        """Opdater markeringen. ``hits`` er ét ``(rect, tekst)`` **pr. linje**.
 
-    def _on_release(self, event):
-        if not self._draw:
-            return
+        Ét rect pr. linje -- ikke pr. ord -- baade fordi markeringen saa ikke
+        bliver til en stak halvgennemsigtige ord-rammer oven i hinanden, og fordi
+        den faerdige fremhaevning saa daekker mellemrummene mellem ordene.
+        """
         d = self._draw
-        self._draw = None
+        if (abs(cx - d["x0"]) < _DRAG_SLOP and abs(cy - d["y0"]) < _DRAG_SLOP):
+            d["hits"] = []          # et rent klik markerer ikke noget
+            self.viewport().update()
+            return
+        lines = d.get("lines")
+        if lines is None:
+            lines = d["lines"] = self._visual_lines(d["rec"])
+        hits = []
+        for run in self._line_runs(lines, (d["x0"], d["y0"]), (cx, cy)):
+            xs = [v for _b, w in run for v in (w[0], w[2])]
+            ys = [v for _b, w in run for v in (w[1], w[3])]
+            hits.append(((min(xs), min(ys), max(xs), max(ys)),
+                         " ".join(w[4] for _b, w in run)))
+        d["hits"] = hits
+        self.viewport().update()
+
+    def mouseReleaseEvent(self, event):  # noqa: N802 - Qt-API
+        d, self._draw = self._draw, None
+        if not d:
+            return super().mouseReleaseEvent(event)
         mode = d["mode"]
         if mode == "pan":
-            self._after_scroll()
+            self._apply_cursor()
+            self._render_timer.start(30)
             return
         cx, cy = self._cxy(event)
         rec = d["rec"]
         vt = rec["vt"]
         tool = self.active_tool
         if mode == "text":
-            self.canvas.delete("wip")
             hits = d.get("hits", [])
             rects = [r for r, _w in hits]
             if tool == "select":
                 # Markeringen bliver STAAENDE (modsat markup-vaerktoejerne, der
                 # forbruger den med det samme), saa hoejreklik kan handle paa den.
-                if rects:
-                    self._text_selection = {
-                        "page_uid": rec["uid"],
-                        "rects": tuple(rects),
-                        "text": " ".join(w for _r, w in hits),
-                    }
-                else:
-                    self._clear_text_selection()
-                self._draw_overlays()
+                self._text_selection = ({"page_uid": rec["uid"],
+                                         "rects": tuple(rects),
+                                         "text": " ".join(w for _r, w in hits)}
+                                        if rects else None)
+                self.viewport().update()
                 return
-            self.canvas.delete("selrect")
-            if not rects:
-                return
-            if tool in _TEXT_TOOLS:
+            if rects and tool in _TEXT_TOOLS:
                 self._commit_text(rec["uid"], tool, rects)
+            self.viewport().update()
             return
-        # shape
-        self.canvas.delete("wip")
+
+        # figur
         if tool == "ink":
             pts = d["pts"]
             if len(pts) < 2:
+                self.viewport().update()
                 return
             stroke = tuple(vt.canvas_to_pdf(px, py) for px, py in pts)
-            self._commit(rec["uid"], em.AnnotationSpec(kind=an.ANNOT_INK, strokes=(stroke,),
-                                                       color=self.color, width=self.width))
-        elif tool == "line":
+            self._commit(rec["uid"], em.AnnotationSpec(
+                kind=an.ANNOT_INK, strokes=(stroke,), color=self.color, width=self.width))
+            return
+        if tool == "line":
             x0, y0 = vt.canvas_to_pdf(d["x0"], d["y0"])
             x1, y1 = vt.canvas_to_pdf(cx, cy)
-            self._commit(rec["uid"], em.AnnotationSpec(kind=an.ANNOT_LINE,
-                         rects=((x0, y0, x1, y1),), color=self.color, width=self.width))
-        else:
-            r = vt.rect_from_canvas(d["x0"], d["y0"], cx, cy)
-            if (r[2] - r[0]) < 2 or (r[3] - r[1]) < 2:
+            self._commit(rec["uid"], em.AnnotationSpec(
+                kind=an.ANNOT_LINE, rects=((x0, y0, x1, y1),),
+                color=self.color, width=self.width))
+            return
+        r = vt.rect_from_canvas(d["x0"], d["y0"], cx, cy)
+        if (r[2] - r[0]) < 2 or (r[3] - r[1]) < 2:
+            self.viewport().update()
+            return
+        if tool == "crop":
+            # Beskaering gaelder KUN den side gestussen skete paa: et rektangel
+            # fra en A4-portraetside er meningsloest paa en landskabsside.
+            self.app.undo_stack.push(
+                em.set_pages_crop_cmd(self.app.model, [(rec["uid"], r)]))
+            self.rebuild()
+            self.app.after_crop_change(rec["uid"])
+            return
+        if tool == "rect":
+            self._commit(rec["uid"], em.AnnotationSpec(
+                kind=an.ANNOT_RECT, rects=(r,), color=self.color, width=self.width))
+        elif tool == "circle":
+            self._commit(rec["uid"], em.AnnotationSpec(
+                kind=an.ANNOT_CIRCLE, rects=(r,), color=self.color, width=self.width))
+        elif tool == "redact":
+            self._commit(rec["uid"], em.AnnotationSpec(
+                kind=an.ANNOT_REDACT, rects=(r,), color=(0, 0, 0), fill=(0, 0, 0),
+                source="manual"))
+        elif tool == "freetext":
+            dlg = _MultilineDialog(self, _("Tekst"), _("Skriv tekst:"))
+            if dlg.exec() != QDialog.DialogCode.Accepted:
                 return
-            if tool == "crop":
-                # Beskaering gaelder KUN den side gestussen skete paa: et
-                # rektangel fra en A4-portraetside er meningsloest paa en
-                # landskabsside i samme markering.
-                self.app.undo_stack.push(
-                    em.set_pages_crop_cmd(self.app.model, [(rec["uid"], r)]))
-                self.rebuild()
-                self.app.after_crop_change(rec["uid"])
-                return
-            if tool == "rect":
-                self._commit(rec["uid"], em.AnnotationSpec(kind=an.ANNOT_RECT, rects=(r,),
-                             color=self.color, width=self.width))
-            elif tool == "circle":
-                self._commit(rec["uid"], em.AnnotationSpec(kind=an.ANNOT_CIRCLE, rects=(r,),
-                             color=self.color, width=self.width))
-            elif tool == "redact":
-                self._commit(rec["uid"], em.AnnotationSpec(kind=an.ANNOT_REDACT, rects=(r,),
-                             color=(0, 0, 0), fill=(0, 0, 0), source="manual"))
-            elif tool == "freetext":
-                # Vis tekstboksen dér hvor rektanglet blev tegnet (oeverste
-                # venstre hjoerne), ikke midt paa skaermen.
-                at = self._canvas_to_screen(min(d["x0"], cx), min(d["y0"], cy))
-                text = self._ask_multiline(_("Tekst"), _("Skriv tekst:"), at=at)
-                if text:
-                    fitted = self._fit_freetext(r, text, 11.0)
-                    self._commit(rec["uid"], em.AnnotationSpec(kind=an.ANNOT_FREETEXT,
-                                 rects=(fitted,), text=text, color=self.color, fontsize=11.0))
+            text = dlg.value()
+            if text:
+                fitted = self._fit_freetext(r, text, 11.0)
+                self._commit(rec["uid"], em.AnnotationSpec(
+                    kind=an.ANNOT_FREETEXT, rects=(fitted,), text=text,
+                    color=self.color, fontsize=11.0))
 
-    def copy_selected_text(self):
-        """Laeg den markerede tekst paa udklipsholderen."""
-        text = self.selected_text()
-        if not text:
-            return "break"
-        try:
-            self.clipboard_clear()
-            self.clipboard_append(text)
-            self.app.set_status(_("Tekst kopieret"), transient_ms=4000,
-                                kind="success")
-        except tk.TclError:
-            pass
-        return "break"
-
-    def _commit_from_selection(self, kind):
-        """Lav en annotation ud af den staaende tekstmarkering."""
-        sel = self._text_selection
-        if not sel or not sel.get("rects"):
-            return
-        rects = tuple(sel["rects"])
-        if kind == "redact":
-            spec = em.AnnotationSpec(kind=an.ANNOT_REDACT, rects=rects,
-                                     color=(0, 0, 0), fill=(0, 0, 0),
-                                     source="manual")
-        elif kind == "underline":
-            spec = em.AnnotationSpec(kind=an.ANNOT_UNDERLINE, rects=rects,
-                                     color=self.color)
-        elif kind == "strikeout":
-            spec = em.AnnotationSpec(kind=an.ANNOT_STRIKEOUT, rects=rects,
-                                     color=self.color)
-        else:
-            spec = em.AnnotationSpec(kind=an.ANNOT_HIGHLIGHT, rects=rects,
-                                     color=self.color)
-        page_uid = sel["page_uid"]
-        self._clear_text_selection()
-        self._commit(page_uid, spec)
-
-    def _on_context(self, event):
-        """Hoejreklik i fremviseren. Er der markeret tekst, tilbydes handlinger
-        paa den; ellers er der intet at vise."""
-        self.canvas.focus_set()
-        text = self.selected_text()
-        if not text:
-            return
-        short = (text[:28] + "\u2026") if len(text) > 28 else text
-        menu = tk.Menu(self, tearoff=0)
-        menu.add_command(label=_("Kopiér"), command=self.copy_selected_text)
-        menu.add_separator()
-        menu.add_command(label=_("Fremhæv markering"),
-                         command=lambda: self._commit_from_selection("highlight"))
-        menu.add_command(label=_("Understreg markering"),
-                         command=lambda: self._commit_from_selection("underline"))
-        menu.add_command(label=_("Gennemstreg markering"),
-                         command=lambda: self._commit_from_selection("strikeout"))
-        menu.add_command(label=_("Masker markering"),
-                         command=lambda: self._commit_from_selection("redact"))
-        menu.add_separator()
-        menu.add_command(label=_("Masker alle forekomster af \"%s\"") % short,
-                         command=lambda t=text: self._redact_all_of(t))
-        try:
-            menu.tk_popup(event.x_root, event.y_root)
-        finally:
-            menu.grab_release()
-
-    def _redact_all_of(self, text):
-        """Send teksten videre til sidevisningens soege-maskering (alle filer).
-
-        Feltet ryddes bagefter: soegningen er udfoert, og en efterladt streng ser ud
-        som om der stadig er noget at soege efter."""
-        self._clear_text_selection()
-        view = getattr(self.app, "page_view", None)
-        if view is None:
-            return
-        try:
-            view._search_var.set(text)
-            view._run_search_redaction()
-            view._search_var.set("")
-        except (AttributeError, tk.TclError):
-            pass
-
-    def _on_double(self, event):
+    def mouseDoubleClickEvent(self, event):  # noqa: N802 - Qt-API
         cx, cy = self._cxy(event)
         hit = self._annot_at(cx, cy)
         if not hit:
@@ -814,40 +956,76 @@ class PageCanvas(ttk.Frame):
         found = self.app.model.page_by_uid(page_uid)
         if not found:
             return
-        _, page = found
+        _entry, page = found
         spec = next((a for a in page.annots if a.uid == annot_uid), None)
         if spec is None or spec.kind != an.ANNOT_FREETEXT:
             return
-        new_text = self._ask_multiline(_("Tekst"), _("Skriv tekst:"),
-                                       initial=spec.text,
-                                       at=(event.x_root, event.y_root))
+        dlg = _MultilineDialog(self, _("Tekst"), _("Skriv tekst:"), spec.text or "")
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        new_text = dlg.value()
         if new_text is None or new_text == spec.text:
             return
-        # replace: remove old, add edited (kept at same rect, refit height)
-        rec = self.by_uid.get(page_uid)
         r = spec.rects[0] if spec.rects else (0, 0, 100, 20)
-        fitted = self._fit_freetext(r, new_text, spec.fontsize)
-        new_spec = em.AnnotationSpec(kind=an.ANNOT_FREETEXT, rects=(fitted,), text=new_text,
-                                     color=spec.color, fontsize=spec.fontsize)
+        new_spec = em.AnnotationSpec(
+            kind=an.ANNOT_FREETEXT, rects=(self._fit_freetext(r, new_text, spec.fontsize),),
+            text=new_text, color=spec.color, fontsize=spec.fontsize)
+        self._swap_annotation(page_uid, spec, new_spec, "Rediger tekst")
 
-        def do():
-            self.app.model.remove_annotation(page_uid, annot_uid)
-            self.app.model.add_annotation(page_uid, new_spec)
+    def contextMenuEvent(self, event):  # noqa: N802 - Qt-API
+        """Hoejreklik i fremviseren. Er der markeret tekst, tilbydes handlinger
+        paa den; ellers er der intet at vise."""
+        text = self.selected_text()
+        if not text:
+            return
+        short = (text[:28] + "…") if len(text) > 28 else text
+        menu = QMenu(self)
+        menu.addAction(_("Kopiér"), self.copy_selected_text)
+        menu.addSeparator()
+        menu.addAction(_("Fremhæv markering"),
+                       lambda: self._commit_from_selection("highlight"))
+        menu.addAction(_("Understreg markering"),
+                       lambda: self._commit_from_selection("underline"))
+        menu.addAction(_("Gennemstreg markering"),
+                       lambda: self._commit_from_selection("strikeout"))
+        menu.addAction(_("Masker markering"),
+                       lambda: self._commit_from_selection("redact"))
+        menu.addSeparator()
+        menu.addAction(_("Masker alle forekomster af \"%s\"") % short,
+                       lambda t=text: self._redact_all_of(t))
+        menu.exec(event.globalPos())
 
-        def undo():
-            self.app.model.remove_annotation(page_uid, new_spec.uid)
-            self.app.model.add_annotation(page_uid, spec)
-        from .undo_stack import Command
-        self.app.undo_stack.push(Command("Rediger tekst", do, undo))
-        self._sel = (page_uid, new_spec.uid)
-        self._draw_overlays()
+    def _commit_from_selection(self, kind: str) -> None:
+        """Lav en annotation ud af den staaende tekstmarkering."""
+        sel = self._text_selection
+        if not sel or not sel.get("rects"):
+            return
+        rects = tuple(sel["rects"])
+        if kind == "redact":
+            spec = em.AnnotationSpec(kind=an.ANNOT_REDACT, rects=rects,
+                                     color=(0, 0, 0), fill=(0, 0, 0), source="manual")
+        else:
+            kinds = {"underline": an.ANNOT_UNDERLINE, "strikeout": an.ANNOT_STRIKEOUT,
+                     "highlight": an.ANNOT_HIGHLIGHT}
+            spec = em.AnnotationSpec(kind=kinds.get(kind, an.ANNOT_HIGHLIGHT),
+                                     rects=rects, color=self.color)
+        page_uid = sel["page_uid"]
+        self._clear_text_selection()
+        self._commit(page_uid, spec)
 
-    # --------------------------------------------------------------- commits
-    def _commit(self, page_uid, spec):
+    def _redact_all_of(self, text: str) -> None:
+        """Send teksten videre til sidevisningens soege-maskering (alle filer)."""
+        self._clear_text_selection()
+        view = getattr(self.app, "page_view", None)
+        if view is not None:
+            view.search_and_redact(text)
+
+    # ------------------------------------------------------------ commits
+    def _commit(self, page_uid, spec) -> None:
         self.app.undo_stack.push(em.add_annotation_cmd(self.app.model, page_uid, spec))
-        self._draw_overlays()
+        self.viewport().update()
 
-    def _commit_text(self, page_uid, tool, rects):
+    def _commit_text(self, page_uid, tool, rects) -> None:
         if not rects:
             return
         if tool == "redact_text":
@@ -859,8 +1037,8 @@ class PageCanvas(ttk.Frame):
             spec = em.AnnotationSpec(kind=kind, rects=tuple(rects), color=self.color)
         self._commit(page_uid, spec)
 
-    # --------------------------------------------------------------- zoom/scroll
-    def _next_zoom(self, direction):
+    # -------------------------------------------------------- zoom og scroll
+    def _next_zoom(self, direction: int) -> float:
         cur = self.zoom
         if direction > 0:
             for z in ZOOM_STEPS:
@@ -872,48 +1050,43 @@ class PageCanvas(ttk.Frame):
                 return z
         return max(ZOOM_MIN, cur / 1.25)
 
-    def _set_zoom(self, z, anchor=None):
-        """Zoom omkring et fast punkt -- som standard viewportens CENTRUM.
+    def _set_zoom(self, z: float, anchor=None) -> None:
+        """Zoom omkring et fast punkt -- som standard udsnittets CENTRUM.
 
-        Den gamle udgave ankrede kun lodret, og kun til den oeverste sides top,
-        og roerte aldrig ``xview``. Ved 300 % er siden bredere end viewporten, og
-        naar ``scrollregion``-bredden springer fra ~cw til w+2*MARGIN, peger Tk's
-        bevarede x-broek pludselig et helt andet sted hen -- siden forsvandt ud af
-        billedet. Nu udtrykkes ankerpunktet RELATIVT til en side, saa det
-        overlever den nye layout, og saettes tilbage i centrum paa begge akser.
+        Ankerpunktet udtrykkes RELATIVT til en side, saa det overlever det nye
+        layout, og saettes tilbage i centrum paa begge akser. Udtrykt i absolutte
+        rullepositioner ville et zoom-spring flytte siden ud af billedet, naar
+        dokumentets bredde skifter fra "smallere end udsnittet" til bredere.
 
-        ``anchor`` er et (canvas_x, canvas_y)-punkt; udelades det, bruges midten.
+        ``anchor`` er et (laerred_x, laerred_y)-punkt; udelades det, bruges midten.
         """
         z = max(ZOOM_MIN, min(ZOOM_MAX, z))
         if abs(z - self.zoom) < 1e-6:
             return
-        cw = max(1, self.canvas.winfo_width())
-        ch = max(1, self.canvas.winfo_height())
-        ax, ay = anchor if anchor else (self.canvas.canvasx(cw / 2.0),
-                                        self.canvas.canvasy(ch / 2.0))
+        vp = self.viewport()
+        cw, ch = max(1, vp.width()), max(1, vp.height())
+        o = self._origin()
+        ax, ay = anchor if anchor else (o.x() + cw / 2.0, o.y() + ch / 2.0)
         rec = self._page_at(ax, ay) or self._nearest_page(ay)
         uid, fx, fy = None, 0.0, 0.0
         if rec is not None:
             uid = rec["uid"]
-            # Bevidst IKKE klampet til [0,1]: falder centrum i mellemrummet mellem
-            # to sider, beholder det sit forhold til ankersiden, og det er lige
-            # praecis det der faar gestussen til at foeles stabil.
+            # Bevidst IKKE klampet til [0,1]: falder centrum i mellemrummet
+            # mellem to sider, beholder det sit forhold til ankersiden, og det er
+            # lige praecis det der faar gestussen til at foeles stabil.
             fx = (ax - rec["x"]) / max(1.0, rec["w"])
             fy = (ay - rec["y"]) / max(1.0, rec["h"])
 
         self.zoom = z
         self._compute_layout()
-        self._refresh_visible()
-
         rec = self.by_uid.get(uid) if uid else None
         if rec is not None:
-            nx = rec["x"] + fx * rec["w"]
-            ny = rec["y"] + fy * rec["h"]
-            self.canvas.xview_moveto(max(0.0, nx - cw / 2.0) / max(1, self.total_w))
-            self.canvas.yview_moveto(max(0.0, ny - ch / 2.0) / max(1, self.total_h))
-            self._refresh_visible()
-        if self.on_zoom_change:
-            self.on_zoom_change(self.zoom_percent())
+            self.horizontalScrollBar().setValue(
+                int(max(0.0, rec["x"] + fx * rec["w"] - cw / 2.0)))
+            self.verticalScrollBar().setValue(
+                int(max(0.0, rec["y"] + fy * rec["h"] - ch / 2.0)))
+        self._refresh_visible()
+        self.zoom_changed.emit(self.zoom_percent())
 
     def _nearest_page(self, cy):
         """Siden hvis midte ligger taettest paa ``cy`` (naar centrum rammer et
@@ -922,103 +1095,81 @@ class PageCanvas(ttk.Frame):
             return None
         return min(self.pages, key=lambda r: abs(r["y"] + r["h"] / 2.0 - cy))
 
-    def _scroll_to_y(self, y):
-        denom = max(1, self.total_h)
-        self.canvas.yview_moveto(max(0.0, min(1.0, y / denom)))
+    def goto_page(self, uid: str) -> None:
+        """Scroll til en side UDEN at melde et sideskift tilbage.
 
-    def goto_page(self, uid):
-        """Scroll fremviseren til en side UDEN at melde et sideskift tilbage.
-
-        Uden daempningen opstod en feedback-loekke: _select -> goto_page ->
-        _scroll_to_y -> _refresh_visible -> _notify_page -> on_page_change ->
-        tilbage i markeringen. Normalt landede den paa samme uid, men
-        ``yview_moveto`` KLAMPER ved sidste skaerm, saa naer dokumentets slutning
-        pegede current_page_uid() paa en senere side -- og markeringen hoppede
-        foran den man netop pilede hen til."""
+        Uden daempningen opstod en feedback-loekke: markering -> goto_page ->
+        scroll -> sideskift -> tilbage i markeringen. Normalt landede den paa
+        samme uid, men rullepositionen KLAMPER ved sidste skaerm, saa naer
+        dokumentets slutning pegede den paa en senere side -- og markeringen
+        hoppede foran den man netop pilede hen til."""
         rec = self.by_uid.get(uid)
         if rec is None:
             return
         self._suppress_notify = True
         try:
-            self._scroll_to_y(rec["y"] - MARGIN)
+            self.verticalScrollBar().setValue(max(0, rec["y"] - MARGIN))
             self._refresh_visible()
         finally:
             self._suppress_notify = False
         self._last_page = uid
 
-    def _goto_index(self, i):
+    def _goto_index(self, i: int) -> None:
         if 0 <= i < len(self.pages):
             self.goto_page(self.pages[i]["uid"])
-        return "break"
 
-    def _page_step(self, direction):
+    def _page_step(self, direction: int) -> None:
         cur = self.current_page_uid()
         idx = next((k for k, p in enumerate(self.pages) if p["uid"] == cur), 0)
         self._goto_index(max(0, min(len(self.pages) - 1, idx + direction)))
-        return "break"
 
-    def _yview(self, *args):
-        self.canvas.yview(*args)
-        self._after_scroll()
-
-    def _xview(self, *args):
-        self.canvas.xview(*args)
-
-    def _on_wheel(self, event):
+    def wheelEvent(self, event):  # noqa: N802 - Qt-API
         self.rmgr.notify_activity()
-        delta = 0
-        if event.num == 4:
-            delta = -1
-        elif event.num == 5:
-            delta = 1
-        elif event.delta:
-            delta = -1 if event.delta > 0 else 1
-        self.canvas.yview_scroll(delta * 3, "units")
-        self._after_scroll()
-        return "break"
+        if event.modifiers() & Qt.KeyboardModifier.ControlModifier:
+            # Zoom om MARKOEREN, ikke om centrum -- som i enhver PDF-laeser.
+            o = self._origin()
+            pos = event.position().toPoint()
+            anchor = (pos.x() + o.x(), pos.y() + o.y())
+            self._set_zoom(self._next_zoom(1 if event.angleDelta().y() > 0 else -1),
+                           anchor=anchor)
+            event.accept()
+            return
+        super().wheelEvent(event)
 
-    def _on_ctrl_wheel(self, event):
-        up = (event.num == 4) or (getattr(event, "delta", 0) > 0)
-        self._set_zoom(self._next_zoom(1 if up else -1))
-        return "break"
+    def keyPressEvent(self, event):  # noqa: N802 - Qt-API
+        key = event.key()
+        if key == Qt.Key.Key_PageDown:
+            self._page_step(1)
+        elif key == Qt.Key.Key_PageUp:
+            self._page_step(-1)
+        elif key == Qt.Key.Key_Home:
+            self._goto_index(0)
+        elif key == Qt.Key.Key_End:
+            self._goto_index(len(self.pages) - 1)
+        elif key in (Qt.Key.Key_Delete, Qt.Key.Key_Backspace):
+            self.delete_selected()
+        elif key == Qt.Key.Key_Escape:
+            self._clear_selection()
+            self._clear_text_selection()
+            self.viewport().update()
+        elif (key == Qt.Key.Key_C
+              and event.modifiers() & Qt.KeyboardModifier.ControlModifier):
+            self.copy_selected_text()
+        else:
+            super().keyPressEvent(event)
+            return
+        event.accept()
 
-    def _after_scroll(self):
-        if self._render_after:
-            self.after_cancel(self._render_after)
-        self._render_after = self.after(30, self._refresh_visible)
-
-    def _on_configure(self, event):
-        if self._layout_after:
-            self.after_cancel(self._layout_after)
-        self._layout_after = self.after(120, self._relayout)
-
-    def _relayout(self):
-        self._layout_after = None
-        if self.pages or self.geom:
-            self._compute_layout()
-            self._refresh_visible()
-
-    # --------------------------------------------------------------- helpers
-    def _clear_text_selection(self):
+    # ---------------------------------------------------------- hjaelpere
+    def _clear_text_selection(self) -> None:
         self._text_selection = None
-        try:
-            self.canvas.delete("selrect")
-        except tk.TclError:
-            pass
 
-    def selected_text(self) -> str:
-        sel = self._text_selection
-        return (sel or {}).get("text", "").strip()
-
-    def _clear_selection(self):
+    def _clear_selection(self) -> None:
         self._sel = None
-        self.canvas.delete("selbox")
 
     @staticmethod
-    def _hex(rgb):
-        return "#%02x%02x%02x" % tuple(int(round(c * 255)) for c in rgb)
-
-    def _fit_freetext(self, rect, text, fontsize):
+    def _fit_freetext(rect, text, fontsize):
+        """Voks kassens hoejde saa hele teksten faar plads ved ombrydning."""
         x0, y0, x1, y1 = rect
         width = max(60.0, x1 - x0)
         cpl = max(1, int(width / (fontsize * 0.52)))
@@ -1036,50 +1187,3 @@ class PageCanvas(ttk.Frame):
             lines += max(1, n + 1)
         height = max(y1 - y0, lines * fontsize * 1.35 + 8)
         return (x0, y0, x0 + width, y0 + height)
-
-    def _canvas_to_screen(self, canvas_x, canvas_y):
-        """Canvas-koordinat -> absolut skaerm-koordinat (til dialog-placering)."""
-        x = self.canvas.winfo_rootx() + int(canvas_x - self.canvas.canvasx(0))
-        y = self.canvas.winfo_rooty() + int(canvas_y - self.canvas.canvasy(0))
-        return x, y
-
-    def _ask_multiline(self, title, prompt, initial="", at=None):
-        win = tk.Toplevel(self)
-        win.title(title)
-        win.transient(self.winfo_toplevel())
-        ttk.Label(win, text=prompt).pack(anchor="w", padx=10, pady=(10, 4))
-        txt = tk.Text(win, width=44, height=6, wrap="word")
-        if initial:
-            txt.insert("1.0", initial)
-        txt.pack(fill="both", expand=True, padx=10)
-        txt.focus_set()
-        result = {"v": None}
-        btns = ttk.Frame(win)
-        btns.pack(fill="x", padx=10, pady=8)
-
-        def ok():
-            result["v"] = txt.get("1.0", "end-1c")
-            win.destroy()
-
-        def cancel():
-            win.destroy()
-        ttk.Button(btns, text=_("OK"), command=ok).pack(side="right")
-        ttk.Button(btns, text=_("Annuller"), command=cancel).pack(side="right", padx=(0, 6))
-        win.bind("<Escape>", lambda e: cancel())
-        win.bind("<Control-Return>", lambda e: ok())
-        # Placér boksen dér hvor brugeren tegnede/klikkede -- ikke midt paa
-        # skaermen. Klemmes inden for skaermkanten.
-        if at is not None:
-            win.update_idletasks()
-            w, h = win.winfo_reqwidth(), win.winfo_reqheight()
-            sw, sh = win.winfo_screenwidth(), win.winfo_screenheight()
-            x = max(4, min(int(at[0]), sw - w - 4))
-            y = max(4, min(int(at[1]), sh - h - 4))
-            win.geometry("+%d+%d" % (x, y))
-        try:
-            win.grab_set()
-        except tk.TclError:
-            pass
-        self.wait_window(win)
-        v = result["v"]
-        return v.strip() if v and v.strip() else None

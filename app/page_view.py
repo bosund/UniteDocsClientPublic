@@ -1,292 +1,265 @@
-"""Page view (Fase 3): pages as first-class tiles, with a **virtualized** grid.
+"""Sidevisningen: appens eneste dokumentvisning.
 
-Left: a scrollable panel of page thumbnails grouped per source file. Right: a
-large preview of the selected page.
+Venstre: et rulbart gitter af sideminiaturer grupperet pr. kildefil. Hoejre: den
+kontinuerlige fremviser (``page_canvas.PageCanvas``) med annotations- og
+maskeringsvaerktoejer.
 
-Virtualization is the key to staying responsive on big documents: the layout of
-every page is computed as pure geometry (cheap), but Tk widgets are created ONLY
-for the tiles currently in the viewport (plus a small buffer) and destroyed as
-they scroll out. Creating 1500 widgets up front for a 375-page file froze the UI
-for ~8 s; virtualized, only ~20-40 widgets ever exist at once.
+**Gitteret tegnes -- det bygges ikke af widgets.** 8.x lavede én ``tk.Frame``
+med tre børn pr. synlig flise og rev dem ned igen ved hver scroll-tick
+(virtualisering var noedvendig, fordi 1500 widgets frøs UI'et i ~8 s). Her er
+gitteret ét ``QAbstractScrollArea``, hvor ``paintEvent`` tegner de celler der er
+i udsnittet. Der findes dermed *ingen* fliswidgets at oprette, genbruge eller
+destruere: scroll er ren maling, og markering er en gentegning af to rektangler.
 
-Rendering goes through :class:`~app.page_render.PageRenderManager` (workers never
-touch Tk) and is size-driven (see pdf_renderer). Only visible tiles are queued.
-
-Fase 3 is read-only; per-tile editing / context menu arrive in later phases.
+Layoutet er stadig ren geometri (billigt selv for tusinder af sider), og
+rendering gaar gennem :class:`~app.page_render.PageRenderManager`, hvis workere
+aldrig roerer UI'et -- resultatet leveres paa UI-traaden via ``app._queue``.
 """
 
 from __future__ import annotations
 
-import tkinter as tk
-from tkinter import ttk, simpledialog, colorchooser
-import os
-from pathlib import Path
 import datetime
-import tkinter.font as tkfont
+import os
+import time
+from pathlib import Path
 
-import threading
+from PIL import Image
+from PySide6.QtCore import (QMimeData, QPoint, QPointF, QRect, QRectF, QSize, Qt,
+                            QTimer, Signal)
+from PySide6.QtGui import (QColor, QDrag, QFontMetrics, QKeySequence, QPainter,
+                           QPen, QPixmap, QPolygonF)
+from PySide6.QtWidgets import (QAbstractItemView, QAbstractScrollArea,
+                               QColorDialog, QFrame, QHBoxLayout, QLabel,
+                               QLineEdit, QListWidget, QListWidgetItem, QMenu,
+                               QApplication, QSizePolicy, QSlider, QSplitter, QStyle,
+                               QStyleOptionViewItem, QStyledItemDelegate,
+                               QToolButton, QVBoxLayout, QWidget)
 
-import pymupdf
-from PIL import Image, ImageTk
-
-from . import edit_model as em
-from . import pdf_utils
-from . import pdf_renderer
-from . import page_render
 from . import annotations as an
+from . import edit_model as em
+from . import icons_vector
+from . import ocr_text
+from . import page_render
+from . import pdf_renderer
+from . import pdf_utils
+from . import qt_util
 from . import redaction
 from . import theme
-from . import icons_vector
-from .tooltip import Tooltip
-from .view_transform import ViewTransform
-from .page_canvas import PageCanvas
+from . import welcome
+from .localization import LocalizationManager
 from .logging_config import get_logger
+from .page_canvas import PageCanvas
+from .tooltip import Tooltip
 
 logger = get_logger(__name__)
+_ = LocalizationManager.get_text
 
-# Vaerktoej -> (ikonnavn, tooltip). Raekkefoelgen bestemmer bar-layoutet;
-# tuplerne grupperes af _TOOL_GROUPS nedenfor. redact/redact_text farves altid
-# roede (destruktive) -- se _tool_color().
-_REDACT_TOOLS = ("redact", "redact_text")
-
-TILE_IMG = (110, 140)          # rendered image box inside a tile
+# --- geometri -------------------------------------------------------------
+# Basis-flisestoerrelsen. Den faktiske stoerrelse er ``base * skala`` og styres
+# af skyderen under gitteret; alle afledte maal regnes derfor pr. instans og
+# ikke som modulkonstanter.
+TILE_IMG = (110, 140)          # renderet billedfelt inde i en flise (100 %)
 TILE_PAD = 6
-NUM_H = 18                     # page-number strip
-TILE_OUTER_W = TILE_IMG[0] + 2 * TILE_PAD
-TILE_OUTER_H = TILE_IMG[1] + NUM_H + 2 * TILE_PAD
-CELL_W = TILE_OUTER_W + 10     # grid cell incl. spacing
-CELL_H = TILE_OUTER_H + 10
+NUM_H = 18                     # stribe med sidetal
+TILE_SCALE_MIN = 60            # procent
+TILE_SCALE_MAX = 220
 HEADER_H = 46      # to linjer navn/dato + luft
+# Fluebenet i "Vaelg sider". Fast stoerrelse uanset miniature-skala: det er en
+# kontrol man skal kunne ramme, ikke en del af sidebilledet.
+CHECK_BOX = 16
+CHECK_PAD = 4
 PAD = 8
 GROUP_GAP = 22     # ogsaa udtraeks-zonen ved traek-og-slip
-# Background prefetch: once pages are known, warm the thumbnail cache at low
-# priority so scrolling is instant. Capped so a huge document doesn't render
-# thousands of pages up front (the LRU cache would evict them anyway).
+# Baggrunds-prefetch: naar sidetallet er kendt, varmes miniature-cachen op ved
+# lav prioritet, saa senere scroll er et cache-hit. Loftet er der, saa et kaempe
+# dokument ikke renderer tusinder af sider op front (LRU'en ville smide dem ud).
 PREFETCH_CAP = 400
 
-# Fliser: i hvile en diskret kant, ved valg et LET accent-fyld + 2px accent-ring
-# (ikke det gamle massive blaa felt). Alle vaerdier fra theme.C -- ingen hex her.
-_TILE_BG = theme.C["tile_bg"]
-_TILE_RING = theme.C["border"]
-_SELECT_FILL = theme.C["accent_subtle"]
-_SELECT_RING = theme.C["accent"]
-_CANVAS_BG = theme.C["bg"]
-_DND_BG = theme.C["accent_subtle"]        # drop-highlight paa gitteret
-_EMPTY_FG = theme.C["text_muted"]         # "ingen sider"-tekst
-_HEADER_BG = theme.C["bg"]                # filhovedets flade i hvile
-_DROP_LINE = theme.C["drop_line"]         # indsaetnings-indikator ved traek
+DRAG_THRESHOLD = 5             # px foer et klik bliver til et traek
+AUTOSCROLL_ZONE = 30           # px i top/bund der ruller under et traek
+AUTOSCROLL_MS = 60
+_PAGE_MIME = "application/x-unitedocs-pages"
+
+# Maskeringsvaerktoejer farves altid roede (destruktive) -- se ``_tool_color``.
+_REDACT_TOOLS = ("redact", "redact_text")
 
 
-class PageView(ttk.Frame):
-    def __init__(self, parent, app):
+def pil_to_pixmap(img: Image.Image) -> QPixmap:
+    return icons_vector.pil_to_qpixmap(img)
+
+
+class ThumbnailGrid(QAbstractScrollArea):
+    """Det tegnede sidegitter.
+
+    Ejer layout, markering, traek-og-slip og maling. Kommunikerer opad gennem
+    signaler, saa ``PageView`` kan holde sammen paa fremviseren uden at gitteret
+    kender til den.
+    """
+
+    page_activated = Signal(str)     # uid -- vis siden i fremviseren
+    selection_changed = Signal()
+    context_page = Signal(str, QPoint)
+    context_file = Signal(str, QPoint)
+    external_drop = Signal(list, object)   # stier, fil-indeks (eller None)
+    select_mode_changed = Signal(bool)     # "Vaelg sider" slaaet til/fra
+
+    def __init__(self, parent, view: "PageView"):
         super().__init__(parent)
-        self.app = app
-        self.render_mgr = app.page_render_mgr
-        self.cells = []            # layout cells (geometry only, no widgets)
-        self.page_order = []       # ordered page uids (for keyboard navigation)
+        self.view = view
+        self.app = view.app
+        self.render_mgr = view.app.page_render_mgr
+
+        self.cells: list[dict] = []
+        self.page_order: list[str] = []
         self.total_height = 0
         self.cols = 1
-        self.active = {}           # cell_key -> {'win': canvas_item, 'w': dict, 'cell': cell}
-        self._render_after = None
-        self._layout_after = None
-        self._preview_after = None
-        self._preview_photo = None
-        self._preview_uid = None
-        self._selected = []             # ordnede side-uids (multi-markering)
-        self._anchor_uid = None         # Shift-omraadets anker
-        self._selected_file = None      # fil-iid; udelukker sidemarkering
-        self._hdr_font = None           # cachet tkfont.Font til hovedets maalinger
-        self._ctx_file = None           # filen en fil-kontekstmenu blev aabnet paa
-        self._drag = None               # igangvaerende sidetraek
-        self._drag_ghost = None         # halvgennemsigtigt traek-vindue
-        self._ghost_photo = None        # dets PhotoImage (skal holdes i live)
-        self._dropbar = None            # widget der viser hvor siden lander
-        self._autoscroll_after = None
-        # Annotation drawing state (Fase 6+).
-        self.active_tool = "hand"
-        self._tool_var = tk.StringVar(value="hand")
-        self._vt = None                 # ViewTransform for the shown preview
-        self._preview_geom = None       # (rotate_deg, disp_w, disp_h) snapshot
-        self._preview_words = []        # get_text('words') for text-markup tools
-        self._preview_delta = 0         # user rotation delta of the shown page
-        self._draw = None               # in-progress drawing gesture
-        self._anno_color = (1.0, 0.0, 0.0)
-        self._anno_width = 2.0
-        self._search_var = tk.StringVar()
-        self._text_selection = None     # cursor-selected words (right-click target)
+        self.tile_scale = 100          # procent; styres af skyderen
+        self._apply_tile_scale()
+        self._pix: dict[str, QPixmap] = {}      # uid -> tegnet miniature
+        self._pix_key: dict[str, tuple] = {}    # uid -> noeglen billedet kom fra
 
-        paned = ttk.PanedWindow(self, orient="horizontal")
-        paned.pack(fill="both", expand=True)
+        self.select_mode = False               # "Vaelg sider": flueben paa fliserne
+        self._selected: list[str] = []          # ordnede side-uids
+        self._anchor_uid: str | None = None     # Shift-omraadets anker
+        self._selected_file: str | None = None  # udelukker sidemarkering
+        self._drop_target = None
+        self._drag_origin: QPoint | None = None
+        self._drag_uid: str | None = None
+        self._drop_highlight = False
 
-        left = ttk.Frame(paned)
-        self.canvas = tk.Canvas(left, borderwidth=0, highlightthickness=0,
-                                background=_CANVAS_BG)
-        vsb = ttk.Scrollbar(left, orient="vertical", command=self._on_scrollbar)
-        self.canvas.configure(yscrollcommand=vsb.set)
-        vsb.pack(side="right", fill="y")
-        self.canvas.pack(side="left", fill="both", expand=True)
-        self.canvas.bind("<Configure>", self._on_canvas_configure)
-        self.canvas.bind("<MouseWheel>", self._on_mousewheel)
-        self.canvas.bind("<Button-4>", self._on_mousewheel)
-        self.canvas.bind("<Button-5>", self._on_mousewheel)
-        # Keyboard navigation: next/previous page without clicking thumbnails.
-        self.canvas.configure(takefocus=True)
-        self.canvas.bind("<Button-1>", lambda e: self.canvas.focus_set())
-        self.canvas.bind("<Down>", lambda e: self._navigate(self.cols))
-        self.canvas.bind("<Up>", lambda e: self._navigate(-self.cols))
-        self.canvas.bind("<Right>", lambda e: self._navigate(1))
-        self.canvas.bind("<Left>", lambda e: self._navigate(-1))
-        self.canvas.bind("<Next>", lambda e: self._navigate(self._page_step()))     # PageDown
-        self.canvas.bind("<Prior>", lambda e: self._navigate(-self._page_step()))   # PageUp
-        self.canvas.bind("<Home>", lambda e: self._navigate(-10 ** 9))
-        self.canvas.bind("<End>", lambda e: self._navigate(10 ** 9))
-        self.canvas.bind("<Delete>", lambda e: self._delete_selected_key())
-        paned.add(left, weight=1)
+        self.setFrameShape(QFrame.Shape.NoFrame)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.setAcceptDrops(True)
+        self.viewport().setMouseTracking(True)
+        self.verticalScrollBar().setSingleStep(24)
+        self.verticalScrollBar().valueChanged.connect(self._on_scrolled)
 
-        right = ttk.Frame(paned)
-        self._build_anno_toolbar(right)
-        self.pcanvas = PageCanvas(right, self.app)
-        self.pcanvas.on_zoom_change = self._on_zoom_change
-        self.pcanvas.on_page_change = self._highlight_page
-        self.pcanvas.pack(fill="both", expand=True)
-        paned.add(right, weight=2)
+        # Billed-forespoergsler droslet: under en hurtig scroll males gitteret
+        # straks, men renderinger bestilles foerst naar scroll falder til ro, saa
+        # koeen ikke fyldes med sider der ruller lige ud igen.
+        self._render_timer = QTimer(self)
+        self._render_timer.setSingleShot(True)
+        self._render_timer.timeout.connect(self._request_visible_renders)
 
-        self.app._register_dnd(self.canvas, on_enter=self._dnd_enter, on_leave=self._dnd_leave)
+        self._prefetch_timer = QTimer(self)
+        self._prefetch_timer.setSingleShot(True)
+        self._prefetch_timer.timeout.connect(self._prefetch)
 
-        # Per-page context menu (Fase 4). Reference items by numeric index at
-        # popup time, never by translated label (project rule).
-        self._ctx_uid = None
-        self._menu = tk.Menu(self, tearoff=0)
-        self._menu.add_command(label=_("Roter venstre"), command=lambda: self._rotate_ctx(-90))
-        self._menu.add_command(label=_("Roter højre"), command=lambda: self._rotate_ctx(90))
-        self._menu.add_separator()
-        export_menu = tk.Menu(self._menu, tearoff=0)
-        for _fmt, _lbl in (("pdf", "PDF"), ("md", "Markdown"), ("epub", "ePub"),
-                           ("jpg", "JPG"), ("png", "PNG")):
-            export_menu.add_command(label=_lbl, command=lambda f=_fmt: self._export_ctx(f))
-        self._menu.add_cascade(label=_("Eksportér side"), menu=export_menu)
-        self._menu.add_separator()
-        self._menu.add_command(label=_("Slet side"), command=self._delete_ctx)
+        self._autoscroll = QTimer(self)
+        self._autoscroll.timeout.connect(self._autoscroll_step)
+        self._autoscroll_dir = 0
 
-        # Kontekstmenu for et FILHOVED.
-        self._file_menu = tk.Menu(self, tearoff=0)
-        self._file_menu.add_command(label=_("Lås op"), command=self._unlock_file_ctx)
-        self._file_ctx_unlock = self._file_menu.index("end")
-        self._file_menu.add_command(label=_("Vælg alle sider i filen"),
-                                    command=self._select_all_in_file_ctx)
-        self._file_menu.add_separator()
-        self._file_menu.add_command(label=_("Slet fil"), command=self._delete_file_ctx)
+    # -------------------------------------------------------- flisestoerrelse
+    def _apply_tile_scale(self) -> None:
+        """Udled flise- og cellemaal af den aktuelle skala."""
+        f = max(TILE_SCALE_MIN, min(TILE_SCALE_MAX, int(self.tile_scale))) / 100.0
+        self.tile_img = (max(40, int(round(TILE_IMG[0] * f))),
+                         max(50, int(round(TILE_IMG[1] * f))))
+        self.cell_w = self.tile_img[0] + 2 * TILE_PAD + 10
+        self.cell_h = self.tile_img[1] + NUM_H + 2 * TILE_PAD + 10
 
-    def _dnd_enter(self, event):
-        self.canvas.configure(background=_DND_BG)
-        return event.action
+    def set_tile_scale(self, percent: int) -> None:
+        """Skift miniature-stoerrelse.
 
-    def _dnd_leave(self, event):
-        self.canvas.configure(background=_CANVAS_BG)
-        return event.action
-
-    # ------------------------------------------------------------------ build
-    def rebuild(self):
-        """Recompute the (widget-free) layout and refresh the visible widgets.
-        Cheap even for thousands of pages — no per-page widgets are created here."""
-        self.render_mgr.bump_generation()
-        # Drop all active widgets back to nothing (they will be recreated for the
-        # new layout's visible range).
-        for key in list(self.active):
-            self._recycle(key)
+        Stoerrelsen indgaar i render-cachens noegle (``box``), saa de gamle
+        billeder passer ikke til det nye maal. Vi rydder derfor baade pixmaps og
+        noegler og bestiller de synlige fliser igen -- en allerede cachet
+        rendering i den NYE stoerrelse rammes stadig med det samme.
+        """
+        percent = max(TILE_SCALE_MIN, min(TILE_SCALE_MAX, int(percent)))
+        if percent == self.tile_scale:
+            return
+        # Behold den oeverste synlige side i syne, saa gitteret ikke hopper.
+        anchor = self._top_visible_uid()
+        self.tile_scale = percent
+        self._apply_tile_scale()
+        self._pix.clear()
+        self._pix_key.clear()
         self._compute_layout()
-        # Keep a valid selection across rebuilds; auto-select the first page so the
-        # preview and keyboard navigation are ready immediately.
+        if anchor:
+            self.ensure_visible(anchor)
+        self.viewport().update()
+        self._render_timer.start(30)
+        self._prefetch_timer.start(400)
+
+    def _top_visible_uid(self):
+        top = self._offset()
+        for c in self.cells:
+            if c["kind"] == "tile" and c["y"] + c["h"] >= top:
+                return c["key"]
+        return None
+
+    # ------------------------------------------------------------- layout
+    def rebuild(self) -> None:
+        """Genberegn layoutet og gentegn. Billigt selv for tusinder af sider."""
+        self.render_mgr.bump_generation()
+        self._compute_layout()
         live = set(self.page_order)
         self._selected = [u for u in self._selected if u in live]
         if self._anchor_uid not in live:
             self._anchor_uid = self._selected[-1] if self._selected else None
         if self._selected_file and self.app.model.entry_by_iid(self._selected_file) is None:
             self._selected_file = None
-        self._refresh_visible()
+        # Miniaturer for sider der ikke findes laengere maa ikke hobe sig op.
+        for uid in [u for u in self._pix if u not in live]:
+            self._pix.pop(uid, None)
+            self._pix_key.pop(uid, None)
+        self.viewport().update()
+        self._render_timer.start(50)
+        self._prefetch_timer.start(250)
         if not self._selected and not self._selected_file and self.page_order:
-            self._select_and_reveal(self.page_order[0])
-        # Rebuild the continuous preview (stacked pages) from the model.
-        if getattr(self, 'pcanvas', None) is not None:
-            self.pcanvas.set_document()
-        # Warm the cache in the background (low priority) after the visible tiles
-        # and preview have had a head start.
-        self.after(250, self._prefetch)
+            self.select_and_reveal(self.page_order[0])
 
-    def _prefetch(self):
-        """Render pages into the thumbnail cache in the background at low priority,
-        so scrolling later is a cache hit. Visible tiles (pri 1) and the preview
-        (pri 0) always preempt this (pri 2)."""
-        if not self.cells:
-            return
-        gen = self.render_mgr._current_generation()
-        pw = self.app._get_all_passwords()
-        count = 0
-        for c in self.cells:
-            if c["kind"] != "tile":
-                continue
-            page = c["page"]
-            if self.render_mgr.cache.get(self._tile_key(page)) is not None:
-                continue
-            self.render_mgr.request(
-                page.uid, page.src_path, pw, page.src_index, page.rotation,
-                TILE_IMG, self._on_tile_ready, priority=2, generation=gen,
-                crop=page.crop)
-            count += 1
-            if count >= PREFETCH_CAP:
-                break
-
-    def _compute_layout(self):
-        width = max(1, self.canvas.winfo_width())
-        self.cols = max(1, (width - 2 * PAD) // CELL_W)
-        cells = []
-        page_order = []
+    def _compute_layout(self) -> None:
+        width = max(1, self.viewport().width())
+        self.cols = max(1, (width - 2 * PAD) // self.cell_w)
+        cells: list[dict] = []
+        page_order: list[str] = []
         y = PAD
         files = self.app.model.files
-        self.canvas.delete("empty")
         if not files:
             self.cells = []
             self.page_order = []
-            self.canvas.create_text(PAD, PAD, anchor="nw", fill=_EMPTY_FG, tags=("empty",),
-                                    text=_("Ingen sider at vise. Tilføj filer."))
             self.total_height = 60
-            self.canvas.configure(scrollregion=(0, 0, width, 60))
+            self._sync_scrollbar()
             return
         for entry in files:
             cells.append({"kind": "header", "key": "h:" + entry.iid,
                           "x": PAD, "y": y, "w": width - 2 * PAD, "h": HEADER_H,
-                          "entry": entry})
+                          "entry": entry, "page": None})
             y += HEADER_H
-            if entry.pages_loaded and entry.pages:
-                items = list(entry.pages)
-            else:
-                items = [None]      # locked placeholder
+            items = list(entry.pages) if (entry.pages_loaded and entry.pages) else [None]
             for i, page in enumerate(items):
                 col, row = i % self.cols, i // self.cols
-                x = PAD + col * CELL_W
-                cy = y + row * CELL_H
                 cells.append({
                     "kind": "tile" if page is not None else "locked",
                     "key": page.uid if page is not None else "lock:" + entry.iid,
-                    "x": x, "y": cy, "w": CELL_W, "h": CELL_H,
+                    "x": PAD + col * self.cell_w, "y": y + row * self.cell_h,
+                    "w": self.cell_w, "h": self.cell_h,
                     "entry": entry, "page": page,
                     "num": self._page_number(entry, page, i)})
                 if page is not None:
                     page_order.append(page.uid)
             nrows = (len(items) + self.cols - 1) // self.cols
-            y += nrows * CELL_H + GROUP_GAP
+            y += nrows * self.cell_h + GROUP_GAP
         self.cells = cells
         self.page_order = page_order
         self.total_height = y
-        self.canvas.configure(scrollregion=(0, 0, width, y))
+        self._sync_scrollbar()
+
+    def _sync_scrollbar(self) -> None:
+        sb = self.verticalScrollBar()
+        page = max(1, self.viewport().height())
+        sb.setPageStep(page)
+        sb.setRange(0, max(0, self.total_height - page))
 
     @staticmethod
-    def _page_number(entry, page, position):
+    def _page_number(entry, page, position) -> str:
         """Etiketten under en flise.
 
-        Sider fra filen selv viser deres KILDE-sidetal (``src_index + 1``), så
+        Sider fra filen selv viser deres KILDE-sidetal (``src_index + 1``), saa
         man kan se hvad der er slettet. Indsatte sider har ingen kildeside i
-        filen — de viser deres plads i listen med et plus foran, så tallene
+        filen -- de viser deres plads i listen med et plus foran, saa tallene
         ikke kolliderer."""
         if page is None:
             return ""
@@ -294,126 +267,63 @@ class PageView(ttk.Frame):
             return str(page.src_index + 1)
         return "+%d" % (position + 1)
 
-    def page_number_label(self, uid):
-        """Det tal brugeren ser under en side (eller None hvis ukendt)."""
+    def page_number_label(self, uid: str) -> str | None:
         for c in self.cells:
             if c["kind"] == "tile" and c["key"] == uid:
                 return c.get("num")
         return None
 
-    # --------------------------------------------------------------- viewport
-    def _visible_range(self, buffer=None):
-        h = self.canvas.winfo_height()
+    def resizeEvent(self, event):  # noqa: N802 - Qt-API
+        super().resizeEvent(event)
+        self._compute_layout()
+        self.viewport().update()
+        self._render_timer.start(50)
+
+    # ------------------------------------------------------------ maling
+    def _offset(self) -> int:
+        return self.verticalScrollBar().value()
+
+    def _visible_cells(self, buffer: int | None = None):
+        top = self._offset()
+        h = self.viewport().height()
         if buffer is None:
-            buffer = h                     # one screen of look-ahead each way
-        top = self.canvas.canvasy(0) - buffer
-        bottom = self.canvas.canvasy(0) + h + buffer
-        return top, bottom
+            buffer = h
+        lo, hi = top - buffer, top + h + buffer
+        return [c for c in self.cells if not (c["y"] + c["h"] < lo or c["y"] > hi)]
 
-    def _refresh_visible(self):
-        """Place widgets for the visible range and recycle the rest. Cheap and
-        SYNCHRONOUS — called directly on every scroll tick so the grid is always
-        drawn (never a blank field). Image *rendering* is throttled separately."""
-        self._render_after = None
+    def paintEvent(self, event):  # noqa: N802 - Qt-API
+        p = QPainter(self.viewport())
+        p.setRenderHint(QPainter.RenderHint.Antialiasing, False)
+        p.fillRect(self.viewport().rect(),
+                   QColor(theme.C["accent_subtle"] if self._drop_highlight
+                          else theme.C["bg"]))
         if not self.cells:
+            p.setPen(QColor(theme.C["text_muted"]))
+            p.setFont(theme.font("base"))
+            p.drawText(QRect(PAD, PAD, self.viewport().width() - 2 * PAD, 40),
+                       Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+                       _("Ingen sider at vise. Tilføj filer."))
             return
-        top, bottom = self._visible_range()
-        needed = {}
+
+        dy = -self._offset()
+        clip = self.viewport().rect().adjusted(0, -self.cell_h, 0, self.cell_h)
         for c in self.cells:
-            if c["y"] + c["h"] < top or c["y"] > bottom:
+            r = QRect(c["x"], c["y"] + dy, c["w"], c["h"])
+            if not clip.intersects(r):
                 continue
-            needed[c["key"]] = c
-        for key in list(self.active):
-            if key not in needed:
-                self._recycle(key)
-        for key, c in needed.items():
-            if key not in self.active:
-                self._place(c)
+            if c["kind"] == "header":
+                self._paint_header(p, c, r)
+            elif c["kind"] == "locked":
+                self._paint_locked(p, c, r)
             else:
-                # Keep position in sync after a relayout (width change).
-                a = self.active[key]
-                self.canvas.coords(a["win"], c["x"], c["y"])
-                a["cell"] = c
-        # Ask for the images of whatever settled in view (throttled).
-        self._schedule_render_requests()
+                self._paint_tile(p, c, r)
+        self._paint_drop_indicator(p, dy)
+        p.end()
 
-    def _schedule_render_requests(self):
-        """Throttle image requests: during a fast scroll tiles are placed (grid
-        visible) but their renders are only requested once scrolling pauses, so the
-        render queue is never flooded with pages that scroll straight back out."""
-        if getattr(self, "_render_req_after", None):
-            self.after_cancel(self._render_req_after)
-        self._render_req_after = self.after(50, self._request_visible_renders)
-
-    def _request_visible_renders(self):
-        self._render_req_after = None
-        gen = self.render_mgr._current_generation()
-        pw = self.app._get_all_passwords()
-        for key, a in self.active.items():
-            cell = a["cell"]
-            if cell["kind"] != "tile":
-                continue
-            page = cell["page"]
-            # Sammenlign med den noegle flisens billede blev tegnet FRA. Den gamle
-            # test var blot "har flisen et billede?", og den var sand for evigt --
-            # saa en roteret eller beskaaret side fik aldrig hentet nyt billede.
-            if a.get("photo_key") == self._tile_key(page):
-                continue
-            self.render_mgr.request(
-                page.uid, page.src_path, pw, page.src_index, page.rotation,
-                TILE_IMG, self._on_tile_ready, priority=1, generation=gen,
-                crop=page.crop)
-
-    # ------------------------------------------------------------------ widgets
-    def _place(self, cell):
-        if cell["kind"] == "header":
-            w = self._make_header(cell)
-        elif cell["kind"] == "locked":
-            w = self._make_locked(cell)
-        else:
-            w = self._make_tile(cell)
-        win = self.canvas.create_window(cell["x"], cell["y"], anchor="nw",
-                                        window=w["holder"], width=cell["w"], height=cell["h"])
-        self.active[cell["key"]] = {"win": win, "w": w, "cell": cell}
-        if cell["kind"] == "tile":
-            # Instant show if already rendered (keeps thumbnails visible during a
-            # fast scroll); otherwise a throttled request fills it in.
-            page = cell["page"]
-            cached = self.render_mgr.cache.get(self._tile_key(page))
-            if cached is not None:
-                self._set_tile_image(cell["key"], cached)
-
-    def _recycle(self, key):
-        a = self.active.pop(key, None)
-        if not a:
-            return
-        try:
-            self.canvas.delete(a["win"])
-            a["w"]["holder"].destroy()
-        except tk.TclError:
-            pass
-
-    def _bind_wheel(self, widget):
-        """Forward wheel events over a tile/header to the canvas so scrolling
-        works even when the pointer is over a thumbnail (not just empty space)."""
-        widget.bind("<MouseWheel>", self._on_mousewheel)
-        widget.bind("<Button-4>", self._on_mousewheel)
-        widget.bind("<Button-5>", self._on_mousewheel)
-
-    # ------------------------------------------------------------- filhoved
-    # Hovedet viser filnavn + oprettelsesdato og (hvis relevant) en haengelaas.
-    # Datoen har FORTRINSRET: teksten ombrydes til hoejst to linjer, og er der
-    # stadig ikke plads, forkortes FILNAVNET -- datoen vises altid.
-    def _header_font(self):
-        if getattr(self, "_hdr_font", None) is None:
-            # Cachet paa viewet, ikke pr. hoved: en tkfont.Font pr. hoved ville
-            # lave et nyt Tk-fontobjekt for hver eneste synlig fil.
-            self._hdr_font = tkfont.Font(font=theme.FONTS["strong"])
-        return self._hdr_font
-
+    # -- filhoved: navn + oprettelsesdato + haengelaas ------------------
     @staticmethod
     def _fmt_date(iso: str) -> str:
-        """"YYYY-MM-DD" -> "25/12-2025". Tom streng hvis datoen mangler/er skæv."""
+        """``"YYYY-MM-DD"`` -> ``"25/12-2025"``. Tom hvis datoen mangler."""
         if not iso:
             return ""
         try:
@@ -424,46 +334,8 @@ class PageView(ttk.Frame):
         return _("%(day)02d/%(month)02d-%(year)04d") % {
             "day": d.day, "month": d.month, "year": d.year}
 
-    def _fit_prefix(self, text: str, avail: int, font) -> int:
-        """Antal tegn af ``text`` der kan staa paa ``avail`` px. Binaersoegning,
-        saa det er ~log n maalinger og ikke een pr. tegn."""
-        if font.measure(text) <= avail:
-            return len(text)
-        lo, hi = 0, len(text)
-        while lo < hi:
-            mid = (lo + hi + 1) // 2
-            if font.measure(text[:mid]) <= avail:
-                lo = mid
-            else:
-                hi = mid - 1
-        return lo
-
-    def _ellipsize(self, text: str, avail: int, font) -> str:
-        if font.measure(text) <= avail:
-            return text
-        n = self._fit_prefix(text, max(0, avail - font.measure("…")), font)
-        return (text[:n] + "…") if n else "…"
-
-    def _header_text(self, entry, avail: int) -> str:
-        """Navn + dato paa hoejst to linjer, med datoen bevaret for enhver pris."""
-        font = self._header_font()
-        name = Path(entry.path).name
-        date = self._fmt_date(entry.creation_date)
-        tail = ("   " + date) if date else ""
-        avail = max(20, int(avail))
-        if font.measure(name + tail) <= avail:
-            return name + tail
-        cut = self._fit_prefix(name, avail, font)
-        if cut <= 0:
-            return date or name
-        rest = name[cut:]
-        room = avail - font.measure(tail)
-        if room <= 0:
-            # Ekstremt smalt vindue: dropper resten af navnet, men ikke datoen.
-            return name[:cut] + "\n" + (date or "")
-        return name[:cut] + "\n" + self._ellipsize(rest, room, font) + tail
-
-    def _lock_icon_for(self, entry):
+    @staticmethod
+    def _lock_icon_for(entry):
         """(ikonnavn, farve) for filens krypteringstilstand, eller None."""
         key = getattr(entry, "enc_key", "")
         if key == pdf_utils.ENC_ENCRYPTED:
@@ -472,256 +344,329 @@ class PageView(ttk.Frame):
             return "unlock", theme.C["text_muted"]
         return None
 
-    def _make_header(self, cell):
-        entry = cell["entry"]
-        selected = (entry.iid == self._selected_file)
-        fill = _SELECT_FILL if selected else _HEADER_BG
-        ring = _SELECT_RING if selected else _HEADER_BG
-        # Raa tk.Frame (ikke ttk): sv-ttk er et pixmap-tema, saa en ttk-widget kan
-        # ikke faa markerings-baggrund. Samme moenster som _make_tile.
-        holder = tk.Frame(self.canvas, bd=0, highlightthickness=2,
-                          highlightbackground=ring, highlightcolor=ring,
-                          background=fill)
-        widgets = [holder]
+    def _paint_header(self, p: QPainter, c: dict, r: QRect) -> None:
+        entry = c["entry"]
+        selected = entry.iid == self._selected_file
+        if selected:
+            p.fillRect(r, QColor(theme.C["accent_subtle"]))
+            p.setPen(QPen(QColor(theme.C["accent"]), 2))
+            p.drawRect(r.adjusted(1, 1, -1, -1))
 
-        icon_w = 0
+        x = r.left() + theme.SPACE["sm"]
         lock = self._lock_icon_for(entry)
         if lock is not None:
             name, color = lock
-            img = self.app.icon_factory.get(name, theme.ICON["small"], color)
-            lbl = tk.Label(holder, image=img, background=fill)
-            lbl.image = img                       # hold referencen i live
-            lbl.pack(side="left", padx=(6, 4))
-            icon_w = theme.ICON["small"] + 10
-            widgets.append(lbl)
+            size = theme.ICON["small"]
+            pm = icons_vector.qpixmap(name, size, color)
+            p.drawPixmap(x, r.top() + (r.height() - size) // 2, size, size, pm)
+            x += size + theme.SPACE["sm"]
 
-        avail = max(40, cell["w"] - icon_w - 4 * theme.SPACE["sm"])
-        text = tk.Label(holder, background=fill, foreground=theme.C["text"],
-                        font=theme.FONTS["strong"], justify="left", anchor="w",
-                        text=self._header_text(entry, avail))
-        text.pack(side="left", padx=(0 if icon_w else 6, 4))
-        widgets.append(text)
-
-        for w in widgets:
-            w.bind("<Button-1>", lambda e, i=entry.iid: self._select_file(i))
-            w.bind("<Button-3>", lambda e, i=entry.iid: self._on_header_right_click(e, i))
-            self._bind_wheel(w)
-        return {"holder": holder}
-
-    def refresh_header(self, iid):
-        """Gentegn een fils hoved (navn/dato/haengelaas kan have aendret sig).
-
-        Hovedet er virtualiseret, saa der er kun noget at goere hvis cellen er
-        placeret lige nu; ellers tegnes den korrekt naeste gang den ruller ind."""
-        key = "h:" + iid
-        a = self.active.get(key)
-        if a is None:
+        # Datoen har FORTRINSRET: navnet forkortes foer datoen ofres.
+        p.setFont(theme.font("strong"))
+        fm = QFontMetrics(theme.font("strong"))
+        avail = max(40, r.right() - x - theme.SPACE["md"])
+        name = Path(entry.path).name
+        date = self._fmt_date(entry.creation_date)
+        tail = ("   " + date) if date else ""
+        p.setPen(QColor(theme.C["text"]))
+        if fm.horizontalAdvance(name + tail) <= avail:
+            p.drawText(QRect(x, r.top(), avail, r.height()),
+                       Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+                       name + tail)
             return
-        cell = a["cell"]
-        self._recycle(key)
-        self._place(cell)
+        # To linjer: saa meget af navnet som der er plads til, resten forkortet.
+        line_h = fm.height() + 2
+        top = r.top() + (r.height() - 2 * line_h) // 2
+        cut = self._fit_prefix(name, avail, fm)
+        first, rest = name[:cut], name[cut:]
+        p.drawText(QRect(x, top, avail, line_h),
+                   Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, first)
+        room = max(0, avail - fm.horizontalAdvance(tail))
+        second = (fm.elidedText(rest, Qt.TextElideMode.ElideRight, room) + tail
+                  if room else (date or ""))
+        p.drawText(QRect(x, top + line_h, avail, line_h),
+                   Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, second)
 
-    def _on_header_right_click(self, event, iid):
-        self._select_file(iid)
-        self._ctx_file = iid
-        entry = self.app.model.entry_by_iid(iid)
-        locked = entry is not None and entry.enc_key == pdf_utils.ENC_ENCRYPTED
-        # Poster refereres ved numerisk index, aldrig ved oversat label.
-        self._file_menu.entryconfig(self._file_ctx_unlock,
-                                    state="normal" if locked else "disabled")
-        try:
-            self._file_menu.tk_popup(event.x_root, event.y_root)
-        finally:
-            self._file_menu.grab_release()
-
-    def _unlock_file_ctx(self):
-        if self._ctx_file:
-            self.app.unlock_file(self._ctx_file)
-
-    def _delete_file_ctx(self):
-        if self._ctx_file:
-            self.app.delete_file(self._ctx_file)
-
-    def _select_all_in_file_ctx(self):
-        """Marker alle sider i filen (praktisk foran roter/slet/traek)."""
-        entry = self.app.model.entry_by_iid(self._ctx_file) if self._ctx_file else None
-        if entry is None or not entry.pages:
-            return
-        uids = [p.uid for p in entry.pages]
-        old = set(self._selected)
-        self._selected = [u for u in self.page_order if u in set(uids)]
-        self._anchor_uid = self._selected[0] if self._selected else None
-        self._selected_file = None
-        self._repaint_selection(old)
-        self._report_selection()
-
-    def _make_tile(self, cell):
-        page = cell["page"]
-        selected = page.uid in self._selected
-        fill = _SELECT_FILL if selected else _TILE_BG
-        ring = _SELECT_RING if selected else _TILE_RING
-        # 2px kant via highlightthickness (fast create_window-stoerrelse => ingen
-        # layout-forskydning ved valg). Ringen skifter blot farve.
-        holder = tk.Frame(self.canvas, bd=0, highlightthickness=2,
-                          highlightbackground=ring, highlightcolor=ring, background=fill)
-        pad = tk.Frame(holder, background=fill)
-        pad.place(relx=0.5, y=TILE_PAD, anchor="n", width=TILE_IMG[0], height=TILE_IMG[1])
-        img_lbl = tk.Label(pad, background=_TILE_BG)
-        img_lbl.pack(fill="both", expand=True)
-        num_lbl = tk.Label(holder, background=fill, text=cell.get("num", ""),
-                           font=("Segoe UI", 8))
-        num_lbl.place(relx=0.5, rely=1.0, y=-3, anchor="s")
-        for w in (holder, pad, img_lbl, num_lbl):
-            w.bind("<Button-1>", lambda e, u=page.uid: self._select(u))
-            w.bind("<Control-Button-1>",
-                   lambda e, u=page.uid: (self._select(u, additive=True), "break")[1])
-            w.bind("<Shift-Button-1>",
-                   lambda e, u=page.uid: (self._select(u, extend=True), "break")[1])
-            w.bind("<Button-3>", lambda e, u=page.uid: self._on_tile_right_click(e, u))
-            w.bind("<ButtonPress-1>", lambda e, u=page.uid: self._on_tile_press(e, u), add="+")
-            w.bind("<B1-Motion>", self._on_tile_motion, add="+")
-            w.bind("<ButtonRelease-1>", self._on_tile_release, add="+")
-            self._bind_wheel(w)
-        return {"holder": holder, "img": img_lbl}
-
-    def _make_locked(self, cell):
-        holder = tk.Frame(self.canvas, bd=0, highlightthickness=2,
-                          highlightbackground=_TILE_RING, highlightcolor=_TILE_RING,
-                          background=_TILE_BG)
-        lock_img = self.app.icons.get('lock')
-        lbl = tk.Label(holder, background=_TILE_BG, image=lock_img,
-                       text=("" if lock_img else "🔒"), compound="center")
-        lbl.place(relx=0.5, y=TILE_PAD, anchor="n", width=TILE_IMG[0], height=TILE_IMG[1])
-        tk.Label(holder, background=_TILE_BG, font=("Segoe UI", 8),
-                 text=_("Låst")).place(relx=0.5, rely=1.0, y=-3, anchor="s")
-        self._bind_wheel(holder)
-        for ch in holder.winfo_children():
-            self._bind_wheel(ch)
-        return {"holder": holder}
-
-    # -------------------------------------------------------------- rendering
     @staticmethod
-    def _tile_key(page):
-        """Render-cachens noegle for en sides flise."""
+    def _fit_prefix(text: str, avail: int, fm: QFontMetrics) -> int:
+        """Antal tegn af ``text`` der kan staa paa ``avail`` px (binaersoegning)."""
+        if fm.horizontalAdvance(text) <= avail:
+            return len(text)
+        lo, hi = 0, len(text)
+        while lo < hi:
+            mid = (lo + hi + 1) // 2
+            if fm.horizontalAdvance(text[:mid]) <= avail:
+                lo = mid
+            else:
+                hi = mid - 1
+        return lo
+
+    # -- fliser ---------------------------------------------------------
+    def _paint_tile(self, p: QPainter, c: dict, r: QRect) -> None:
+        page = c["page"]
+        selected = page.uid in self._selected
+        # I hvile en diskret kant, ved valg et LET accent-fyld + accent-ring.
+        p.fillRect(r, QColor(theme.C["accent_subtle"] if selected else theme.C["tile_bg"]))
+        p.setPen(QPen(QColor(theme.C["accent"] if selected else theme.C["border"]),
+                      2 if selected else 1))
+        p.drawRect(r.adjusted(1, 1, -1, -1))
+
+        box = QRect(r.left() + (r.width() - self.tile_img[0]) // 2, r.top() + TILE_PAD,
+                    self.tile_img[0], self.tile_img[1])
+        pm = self._pix.get(page.uid)
+        if pm is not None and not pm.isNull():
+            w = int(pm.width() / pm.devicePixelRatio())
+            h = int(pm.height() / pm.devicePixelRatio())
+            p.drawPixmap(box.left() + (box.width() - w) // 2,
+                         box.top() + (box.height() - h) // 2, pm)
+        else:
+            # Hvidt papir mens siden renderes -- ikke et tomt hul.
+            p.fillRect(box, QColor(theme.C["paper"]))
+            p.setPen(QPen(QColor(theme.C["border"]), 1))
+            p.drawRect(box)
+
+        p.setFont(theme.font("small"))
+        p.setPen(QColor(theme.C["text"]))
+        p.drawText(QRect(r.left(), r.bottom() - NUM_H, r.width(), NUM_H),
+                   Qt.AlignmentFlag.AlignCenter, c.get("num", ""))
+
+        if self.select_mode:
+            self._paint_check(p, self._check_rect(r), selected)
+
+    def _paint_check(self, p: QPainter, box: QRect, on: bool) -> None:
+        """Afkrydsningsfelt paa en flise. Males OVEN PAA miniaturen, saa det
+        ogsaa kan ses paa en side der er hvid i hjoernet."""
+        p.save()
+        p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        p.setBrush(QColor(theme.C["accent"] if on else theme.C["paper"]))
+        p.setPen(QPen(QColor(theme.C["accent"] if on else theme.C["border"]), 1))
+        p.drawRoundedRect(box, 3, 3)
+        if on:
+            p.setPen(QPen(QColor(theme.C["selection_fg"]), 2,
+                          Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap,
+                          Qt.PenJoinStyle.RoundJoin))
+            w, h = box.width(), box.height()
+            p.drawPolyline([QPoint(box.left() + int(w * 0.24), box.top() + int(h * 0.52)),
+                            QPoint(box.left() + int(w * 0.44), box.top() + int(h * 0.72)),
+                            QPoint(box.left() + int(w * 0.78), box.top() + int(h * 0.28))])
+        p.restore()
+
+    def _paint_locked(self, p: QPainter, c: dict, r: QRect) -> None:
+        p.fillRect(r, QColor(theme.C["tile_bg"]))
+        p.setPen(QPen(QColor(theme.C["border"]), 1))
+        p.drawRect(r.adjusted(1, 1, -1, -1))
+        size = theme.ICON["cmdlg"]
+        pm = icons_vector.qpixmap("lock", size, theme.C["warning"])
+        p.drawPixmap(r.center().x() - size // 2, r.top() + TILE_PAD + 40, size, size, pm)
+        p.setFont(theme.font("small"))
+        p.setPen(QColor(theme.C["text_muted"]))
+        p.drawText(QRect(r.left(), r.bottom() - NUM_H, r.width(), NUM_H),
+                   Qt.AlignmentFlag.AlignCenter, _("Låst"))
+
+    CARET = 4          # halv bredde paa indsaetnings-karetens "vinger"
+
+    def _paint_drop_indicator(self, p: QPainter, dy: int) -> None:
+        """Vis hvor de trukne sider lander -- utvetydigt.
+
+        Tre lag, fordi en tynd streg alene er for nem at overse midt i et
+        gitter af fliser:
+          1. **maalgruppen** toenes let, saa man ser hvilken FIL siden havner i,
+          2. **karetten** (bjaelke med vinger) viser den praecise plads,
+          3. ved udtraek: et baand paa tvaers af hele gitteret i mellemrummet.
+
+        I 8.x maatte indikatoren vaere en rigtig widget, fordi Tk altid tegner
+        indlejrede vinduer oeverst. Her males alt i samme lag, saa den blot
+        tegnes sidst.
+        """
+        t = self._drop_target
+        if not t:
+            return
+        accent = QColor(theme.C["drop_line"])
+        if t[0] == "extract":
+            y = self._extract_band_y(t[1]) + dy
+            x0, w = PAD, max(40, self.viewport().width() - 2 * PAD)
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(accent)
+            p.drawRoundedRect(QRectF(x0, y - 2, w, 4), 2, 2)
+            # Vinger i hver ende, saa baandet ikke forveksles med en kant.
+            for cx in (x0 + 2, x0 + w - 2):
+                p.drawEllipse(QRectF(cx - 4, y - 4, 8, 8))
+            return
+
+        self._paint_target_group(p, t[1], dy, accent)
+        geom = self._into_bar_geometry(t)
+        if geom is None:
+            return
+        x, y, w, h = geom
+        y += dy
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(accent)
+        p.drawRoundedRect(QRectF(x - 1, y, w + 2, h), 2, 2)
+        # Trekantede kareter foroven og forneden -- samme sprog som en
+        # tekstmarkoer, saa "her indsaettes" laeses med det samme.
+        c = self.CARET
+        mid = x + w / 2.0
+        # PySide6's drawPolygon tager en SEKVENS -- ikke punkter som varargs.
+        p.drawPolygon(QPolygonF([QPointF(mid - c - 1, y - c),
+                                 QPointF(mid + c + 1, y - c),
+                                 QPointF(mid, y + 2)]))
+        p.drawPolygon(QPolygonF([QPointF(mid - c - 1, y + h + c),
+                                 QPointF(mid + c + 1, y + h + c),
+                                 QPointF(mid, y + h - 2)]))
+
+    def _paint_target_group(self, p: QPainter, iid, dy: int, accent: QColor) -> None:
+        """Ton den fil sidene lander i, saa maalet aldrig er i tvivl."""
+        cells = [c for c in self.cells if c["entry"].iid == iid]
+        if not cells:
+            return
+        top = min(c["y"] for c in cells)
+        bottom = max(c["y"] + c["h"] for c in cells)
+        r = QRectF(PAD - 4, top + dy - 4,
+                   max(40, self.viewport().width() - 2 * PAD + 8),
+                   bottom - top + 8)
+        tint = QColor(accent)
+        tint.setAlpha(28)
+        p.setPen(QPen(accent, 1, Qt.PenStyle.DashLine))
+        p.setBrush(tint)
+        p.drawRoundedRect(r, 6, 6)
+        p.setBrush(Qt.BrushStyle.NoBrush)
+
+    def _into_bar_geometry(self, target):
+        """Lodret bjaelke praecis paa den plads siden indsaettes."""
+        _k, iid, visual = target
+        tiles = [c for c in self.cells if c["kind"] == "tile" and c["entry"].iid == iid]
+        if not tiles:
+            hdr = next((c for c in self.cells
+                        if c["kind"] == "header" and c["entry"].iid == iid), None)
+            return None if hdr is None else (hdr["x"], hdr["y"], 3, hdr["h"])
+        if visual < len(tiles):
+            cell = tiles[visual]
+            x = cell["x"]
+        else:
+            cell = tiles[-1]
+            x = cell["x"] + cell["w"] - 4
+        return (x, cell["y"] + 6, 4, cell["h"] - 12)
+
+    def _extract_band_y(self, file_index) -> int:
+        """Y paa udtraeks-baandet foran den givne fil (eller efter den sidste)."""
+        for c in self.cells:
+            if c["kind"] != "header":
+                continue
+            if self.app.model.index_of_iid(c["entry"].iid) == file_index:
+                return max(2, c["y"] - GROUP_GAP // 2)
+        return max(2, self.total_height - GROUP_GAP // 2)
+
+    # --------------------------------------------------------- rendering
+    def tile_key(self, page):
+        """Render-cachens noegle for en sides flise.
+
+        ``tile_img`` indgaar, fordi stoerrelsen kan aendres af skyderen -- to
+        skalaer maa ikke dele samme cache-post."""
         return page_render.cache_key(page.src_path, page.src_index, page.rotation,
-                                     TILE_IMG, page.crop)
+                                     self.tile_img, page.crop)
 
-    def _set_tile_image(self, key, pil):
-        a = self.active.get(key)
-        if a is None or pil is None:
-            return
-        img = a["w"].get("img")
-        if img is None:
-            return
-        try:
-            photo = ImageTk.PhotoImage(pil)
-        except Exception:
-            return
-        a["photo"] = photo          # keep a ref alive
-        cell = a.get("cell") or {}
-        if cell.get("kind") == "tile":
-            # Husk HVILKEN noegle billedet kom fra, saa _request_visible_renders kan
-            # se at flisen er forældet efter en rotation/beskaering.
-            a["photo_key"] = self._tile_key(cell["page"])
-        img.configure(image=photo)
+    def _on_scrolled(self) -> None:
+        self.render_mgr.notify_activity()   # pause prefetch, saa scroll er glat
+        self.viewport().update()
+        self._render_timer.start(50)
 
-    def _on_tile_ready(self, uid, pil):
+    def _request_visible_renders(self) -> None:
+        gen = self.render_mgr._current_generation()
+        pw = self.app._get_all_passwords()
+        for c in self._visible_cells():
+            if c["kind"] != "tile":
+                continue
+            page = c["page"]
+            key = self.tile_key(page)
+            # Sammenlign med den noegle flisens billede blev tegnet FRA -- ellers
+            # ville en roteret eller beskaaret side aldrig faa nyt billede.
+            if self._pix_key.get(page.uid) == key:
+                continue
+            cached = self.render_mgr.cache.get(key)
+            if cached is not None:
+                self._set_tile_image(page.uid, cached)
+                continue
+            self.render_mgr.request(page.uid, page.src_path, pw, page.src_index,
+                                    page.rotation, self.tile_img, self.on_tile_ready,
+                                    priority=1, generation=gen, crop=page.crop)
+
+    def _prefetch(self) -> None:
+        """Varm cachen op ved lav prioritet. Synlige fliser (pri 1) og
+        fremviseren (pri 0) fortraenger altid dette (pri 2)."""
+        if not self.cells:
+            return
+        gen = self.render_mgr._current_generation()
+        pw = self.app._get_all_passwords()
+        count = 0
+        for c in self.cells:
+            if c["kind"] != "tile":
+                continue
+            page = c["page"]
+            if self.render_mgr.cache.get(self.tile_key(page)) is not None:
+                continue
+            self.render_mgr.request(page.uid, page.src_path, pw, page.src_index,
+                                    page.rotation, self.tile_img, self.on_tile_ready,
+                                    priority=2, generation=gen, crop=page.crop)
+            count += 1
+            if count >= PREFETCH_CAP:
+                break
+
+    def _set_tile_image(self, uid: str, pil) -> None:
+        if pil is None:
+            return
+        found = self.app.model.page_by_uid(uid)
+        if found is None:
+            return
+        self._pix[uid] = pil_to_pixmap(pil)
+        self._pix_key[uid] = self.tile_key(found[1])
+        self.viewport().update()
+
+    def on_tile_ready(self, uid, pil) -> None:
+        """Kaldes paa UI-traaden af render-manageren."""
         self._set_tile_image(uid, pil)
 
-    # -------------------------------------------------------------- scrolling
-    def _on_scrollbar(self, *args):
-        self.render_mgr.notify_activity()      # pause prefetch so scrolling is smooth
-        self.canvas.yview(*args)
-        self._refresh_visible()
-
-    def _on_mousewheel(self, event):
-        self.render_mgr.notify_activity()      # pause prefetch so scrolling is smooth
-        delta = 0
-        if event.num == 4:
-            delta = -1
-        elif event.num == 5:
-            delta = 1
-        elif event.delta:
-            delta = -1 if event.delta > 0 else 1
-        # Scroll by roughly one tile-row per wheel notch for a natural feel.
-        self.canvas.yview_scroll(delta * 3, "units")
-        self._refresh_visible()
-
-    def _on_canvas_configure(self, event):
-        if self._layout_after:
-            self.after_cancel(self._layout_after)
-        self._layout_after = self.after(80, self._relayout)
-
-    def _relayout(self):
-        self._layout_after = None
-        self._compute_layout()
-        self._refresh_visible()
-
-    # -------------------------------------------------------------- navigation
-    def focus_page(self):
-        """Give the tile canvas keyboard focus and select a page if none is."""
-        self.canvas.focus_set()
-        if not self._selected and not self._selected_file and self.page_order:
-            self._select_and_reveal(self.page_order[0])
-
-    def _page_step(self):
-        rows = max(1, self.canvas.winfo_height() // CELL_H)
-        return max(1, self.cols * rows)
-
-    def _navigate(self, step):
-        if not self.page_order:
-            return "break"
-        self.render_mgr.notify_activity()
-        cur = self._selected_uid
-        if cur in self.page_order:
-            i = self.page_order.index(cur)
-            i = max(0, min(len(self.page_order) - 1, i + step))
-        else:
-            i = 0 if step >= 0 else len(self.page_order) - 1
-        self._select_and_reveal(self.page_order[i])
-        return "break"          # don't also let the canvas scroll on arrow keys
-
-    def _select_and_reveal(self, uid):
-        self._ensure_visible(uid)      # scroll first so the tile widget exists
-        self._select(uid)
-
-    def _ensure_visible(self, uid):
-        cell = next((c for c in self.cells if c["key"] == uid), None)
-        if not cell:
-            return
-        top = self.canvas.canvasy(0)
-        h = self.canvas.winfo_height()
-        denom = max(1, self.total_height)
-        if cell["y"] < top:
-            self.canvas.yview_moveto(max(0, cell["y"] - PAD) / denom)
-        elif cell["y"] + cell["h"] > top + h:
-            self.canvas.yview_moveto(max(0, cell["y"] + cell["h"] - h + PAD) / denom)
-        self._refresh_visible()
-
-    # -------------------------------------------------------------- selection
-    # Markeringen er en ORDNET liste af side-uids. Filmarkering (et klik paa et
-    # filhoved) og sidemarkering udelukker hinanden, saa kommandobarens knapper
-    # entydigt ved om de arbejder paa sider eller paa hele filer.
+    # --------------------------------------------------------- markering
     def selected_uids(self) -> list:
-        """Markerede sider i modelraekkefoelge (tom liste hvis en fil er valgt)."""
+        """Markerede sider i modelraekkefoelge (tom hvis en fil er valgt)."""
         order = {u: i for i, u in enumerate(self.page_order)}
         return sorted((u for u in self._selected if u in order), key=order.get)
 
-    @property
-    def _selected_uid(self):
-        """Bagudkompatibel enkelt-uid (main_app laeser den ved "Indsaet side")."""
+    def selected_file(self) -> str | None:
+        return self._selected_file
+
+    def selected_page_uid(self) -> str | None:
         sel = self.selected_uids()
         return sel[-1] if sel else None
 
-    @_selected_uid.setter
-    def _selected_uid(self, uid):
-        self._selected = [uid] if uid else []
-        self._anchor_uid = uid
+    def set_select_mode(self, on: bool) -> None:
+        """Slaa "Vaelg sider" til eller fra.
 
-    def _select(self, uid, *, additive=False, extend=False):
+        Tilstanden aendrer **ikke** markeringsmodellen -- ``_selected`` har altid
+        vaeret en liste. Den goer to ting: hver flise faar et flueben man kan se
+        og ramme, og et almindeligt klik bliver additivt. Det er dét der goer
+        flervalg brugbart uden tastatur.
+        """
+        on = bool(on)
+        if on == self.select_mode:
+            return
+        self.select_mode = on
+        if not on and len(self._selected) > 1:
+            # Slaas fluebenene fra, skal flermarkeringen ogsaa vaek. Ellers ville
+            # "Flet og gem" arbejde paa en markering brugeren ikke laengere kan
+            # se -- usynlig tilstand der styrer en destruktiv handling.
+            self._selected = self._selected[-1:]
+            self._anchor_uid = self._selected[0]
+            self.selection_changed.emit()
+        self.viewport().update()
+        self.select_mode_changed.emit(on)
+
+    def _check_rect(self, r: QRect) -> QRect:
+        """Fluebenets felt i en flise -- oeverste venstre hjoerne."""
+        size = CHECK_BOX
+        return QRect(r.left() + CHECK_PAD, r.top() + CHECK_PAD, size, size)
+
+    def select(self, uid, *, additive=False, extend=False, reveal_in_viewer=True) -> None:
         """Marker en side. ``additive`` = Ctrl-klik, ``extend`` = Shift-klik."""
-        self.canvas.focus_set()
-        old = set(self._selected)
         if extend and self._anchor_uid in self.page_order and uid in self.page_order:
             i, j = self.page_order.index(self._anchor_uid), self.page_order.index(uid)
             lo, hi = min(i, j), max(i, j)
@@ -735,369 +680,292 @@ class PageView(ttk.Frame):
             self._selected = [uid]
             self._anchor_uid = uid
         self._selected_file = None
-        self._repaint_selection(old)
-        if not extend and not additive:
-            self.pcanvas.goto_page(uid)
-        self._report_selection()
+        self.viewport().update()
+        if reveal_in_viewer and not extend and not additive:
+            self.page_activated.emit(uid)
+        self.selection_changed.emit()
 
-    def _select_file(self, iid):
+    def select_file(self, iid: str) -> None:
         """Marker en HEL fil (klik paa filhovedet). Rydder sidemarkeringen."""
-        self.canvas.focus_set()
-        old = set(self._selected)
         self._selected = []
         self._anchor_uid = None
         self._selected_file = iid
-        self._repaint_selection(old)
-        self._report_selection()
+        self.viewport().update()
+        self.selection_changed.emit()
 
-    def _clear_selection(self):
-        old = set(self._selected)
-        self._selected, self._anchor_uid, self._selected_file = [], None, None
-        self._repaint_selection(old)
-
-    def _repaint_selection(self, previously=()):
-        """Gentegn kun de fliser/hoveder hvis tilstand faktisk aendrede sig."""
-        now = set(self._selected)
-        for key in set(previously) | now:
-            a = self.active.get(key)
-            if a and a["cell"]["kind"] == "tile":
-                self._paint_tile_selected(a, key in now)
-        for cell in self.cells:
-            if cell["kind"] != "header":
-                continue
-            a = self.active.get(cell["key"])
-            if a is not None:
-                self._paint_header_selected(a, cell["entry"].iid == self._selected_file)
-
-    def _report_selection(self):
-        try:
-            if self._selected_file:
-                entry = self.app.model.entry_by_iid(self._selected_file)
-                if entry is not None:
-                    self.app.set_status(_("Fil valgt: %s") % Path(entry.path).name)
-                return
-            sel = self.selected_uids()
-            if len(sel) > 1:
-                self.app.set_status(_("%(s)d sider valgt") % {"s": len(sel)})
-            elif sel:
-                idx = self.page_order.index(sel[0]) + 1
-                self.app.set_status(_("Side %(i)d af %(n)d")
-                                    % {"i": idx, "n": len(self.page_order)})
-            else:
-                self.app.set_status()
-        except (ValueError, AttributeError, tk.TclError):
-            pass
-
-    def _highlight_page(self, uid):
-        """Kaldes naar den kontinuerlige fremviser scroller til en ny side.
-
-        Den maa IKKE flytte markeringen: ``goto_page`` -> ``_scroll_to_y`` klamper
-        ved dokumentets slutning, saa ``current_page_uid()`` kan returnere en
-        SENERE side end den man netop pilede hen til -- og markeringen hoppede
-        derfor foran. Her opdateres kun statuslinjen."""
-        try:
-            idx = self.page_order.index(uid) + 1
-        except ValueError:
+    def select_all_in_file(self, iid: str) -> None:
+        """Marker alle sider i filen (praktisk foran roter/slet/traek)."""
+        entry = self.app.model.entry_by_iid(iid)
+        if entry is None or not entry.pages:
             return
-        if self._selected or self._selected_file:
+        want = {p.uid for p in entry.pages}
+        self._selected = [u for u in self.page_order if u in want]
+        self._anchor_uid = self._selected[0] if self._selected else None
+        self._selected_file = None
+        if len(self._selected) > 1:
+            self.set_select_mode(True)
+        self.viewport().update()
+        self.selection_changed.emit()
+
+    def reselect(self, uids) -> None:
+        """Genskab en markering efter en rebuild (uids overlever kommandoerne)."""
+        live = set(self.page_order)
+        keep = {u for u in uids if u in live}
+        if not keep:
             return
-        self.app.set_status(_("Side %(i)d af %(n)d")
-                            % {"i": idx, "n": len(self.page_order)})
+        self._selected = [u for u in self.page_order if u in keep]
+        self._anchor_uid = self._selected[0]
+        self._selected_file = None
+        self.ensure_visible(self._selected[0])
+        self.viewport().update()
+        self.selection_changed.emit()
 
-    def _paint_header_selected(self, active, selected):
-        holder = active["w"].get("holder")
-        if holder is None:
+    def select_and_reveal(self, uid: str) -> None:
+        self.ensure_visible(uid)
+        self.select(uid)
+
+    def ensure_visible(self, uid: str) -> None:
+        cell = next((c for c in self.cells if c["key"] == uid), None)
+        if not cell:
             return
-        fill = _SELECT_FILL if selected else _HEADER_BG
-        ring = _SELECT_RING if selected else _HEADER_BG
-        try:
-            holder.configure(background=fill, highlightbackground=ring,
-                             highlightcolor=ring)
-            for child in holder.winfo_children():
-                try:
-                    child.configure(background=fill)
-                except tk.TclError:
-                    pass
-        except tk.TclError:
-            pass
+        sb = self.verticalScrollBar()
+        top, h = sb.value(), self.viewport().height()
+        if cell["y"] < top:
+            sb.setValue(max(0, cell["y"] - PAD))
+        elif cell["y"] + cell["h"] > top + h:
+            sb.setValue(max(0, cell["y"] + cell["h"] - h + PAD))
 
-    def _paint_tile_selected(self, active, selected):
-        fill = _SELECT_FILL if selected else _TILE_BG
-        ring = _SELECT_RING if selected else _TILE_RING
-        holder = active["w"]["holder"]
-        try:
-            holder.configure(background=fill, highlightbackground=ring, highlightcolor=ring)
-            # holder-boern er pad + sidenummer (billed-label ligger inde i pad og
-            # daekkes af selve billedet, saa dens neutrale baggrund er ligegyldig).
-            for child in holder.winfo_children():
-                child.configure(background=fill)
-        except tk.TclError:
-            pass
+    # -------------------------------------------------------- interaktion
+    def _cell_at(self, pos: QPoint):
+        x, y = pos.x(), pos.y() + self._offset()
+        for c in self.cells:
+            if (c["x"] <= x <= c["x"] + c["w"] and c["y"] <= y <= c["y"] + c["h"]):
+                return c
+        return None
 
-    # -------------------------------------------------------- Fase 4: editing
-    def _on_tile_right_click(self, event, uid):
-        # Et hoejreklik inde i en eksisterende markering bevarer den (som i
-        # Stifinder); ellers markerer det den flise man ramte.
-        if uid not in self._selected:
-            self._select(uid)
-        self._ctx_uid = uid
-        try:
-            self._menu.tk_popup(event.x_root, event.y_root)
-        finally:
-            self._menu.grab_release()
-
-    def _delete_selected_key(self):
-        sel = self.selected_uids()
-        if sel:
-            self.delete_pages(sel)
-        elif self._selected_file:
-            self.app.delete_file(self._selected_file)
-        return "break"
-
-    def _ctx_targets(self) -> list:
-        """Hvilke sider en kontekstmenu-handling gaelder.
-
-        Klikkede man inde i en flermarkering, gaelder den hele markeringen;
-        ellers kun den flise man ramte."""
-        sel = self.selected_uids()
-        if self._ctx_uid and self._ctx_uid in sel:
-            return sel
-        if self._ctx_uid:
-            return [self._ctx_uid]
-        return sel
-
-    def _rotate_ctx(self, delta):
-        uids = self._ctx_targets()
-        if uids:
-            self.rotate_pages(uids, delta)
-
-    def _delete_ctx(self):
-        uids = self._ctx_targets()
-        if uids:
-            self.delete_pages(uids)
-
-    def _export_ctx(self, fmt):
-        uid = self._ctx_uid or self._selected_uid
-        if uid:
-            self.app.export_single_page(uid, fmt)
-
-    def rotate_pages(self, uids, delta):
-        """Roter sider i modellen som EEN undo-handling og opdater fliserne straks.
-
-        Rotation er ikke en render-invalidering: den cachede miniature roteres paa
-        stedet (sub-ms) og gemmes under den nye noegle, saa der er nul
-        PDF_LOCK-trafik. Side-objekterne muteres in place, saa enhver senere
-        rendering bruger allerede den nye rotation.
-        """
-        uids = [u for u in uids if self.app.model.page_by_uid(u)]
-        if not uids:
+    def mousePressEvent(self, event):  # noqa: N802 - Qt-API
+        self.setFocus()
+        cell = self._cell_at(event.position().toPoint())
+        if event.button() != Qt.MouseButton.LeftButton:
+            return super().mousePressEvent(event)
+        if cell is None:
+            return super().mousePressEvent(event)
+        mods = event.modifiers()
+        if cell["kind"] == "header":
+            self.select_file(cell["entry"].iid)
             return
-        pages = {u: self.app.model.page_by_uid(u)[1] for u in uids}
-        cached = {u: self.render_mgr.cache.get(self._tile_key(p))
-                  for u, p in pages.items()}
-        self.app.undo_stack.push(em.rotate_pages_cmd(self.app.model, uids, delta))
-        for uid in uids:
-            self._retile_after_rotate(uid, pages[uid], cached.get(uid), delta)
-        # Vis den nye rotation i den kontinuerlige fremviser (ny layout).
-        self.pcanvas.set_document()
-
-    def _retile_after_rotate(self, uid, page, cached, delta):
-        """Genbrug den allerede renderede miniature i stedet for at rendere igen."""
-        if cached is not None:
-            try:
-                rotated = cached.rotate(-delta, expand=True)
-                rotated.thumbnail(TILE_IMG, Image.Resampling.LANCZOS)
-                self.render_mgr.cache.put(self._tile_key(page), rotated)
-                self._set_tile_image(uid, rotated)
-                return
-            except Exception:
-                pass
-        self._rerequest_tile(uid)
-
-    def _rerequest_tile(self, uid):
-        a = self.active.get(uid)
-        if not a or a["cell"]["kind"] != "tile":
+        if cell["kind"] == "locked":
             return
-        a.pop("photo", None)
-        cell = a["cell"]
-        page = cell["page"]
-        a.pop("photo_key", None)
-        self.render_mgr.request(
-            page.uid, page.src_path, self.app._get_all_passwords(),
-            page.src_index, page.rotation, TILE_IMG, self._on_tile_ready,
-            priority=1, generation=self.render_mgr._current_generation(),
-            crop=page.crop)
-
-    def delete_pages(self, uids):
-        """Haard fjernelse fra modellen (kildefilerne roeres ikke) som EEN
-        undo-handling. Toemmes en fil helt, fjernes hele FileEntry'en."""
-        uids = [u for u in uids if self.app.model.page_by_uid(u)]
-        if not uids:
-            return
-        # Efter sletningen markeres naboen: foerste overlevende EFTER den sidst
-        # slettede side, ellers den sidste overlevende foer den.
-        order = self.page_order
-        doomed = set(uids)
-        last = max((i for i, u in enumerate(order) if u in doomed), default=-1)
-        nxt = next((u for u in order[last + 1:] if u not in doomed), None)
-        if nxt is None:
-            nxt = next((u for u in reversed(order[:last]) if u not in doomed), None)
-        self.app.undo_stack.push(em.delete_pages_cmd(self.app.model, uids))
-        self._selected = [nxt] if nxt else []
-        self._anchor_uid = nxt
-        self.rebuild()
-        if self._selected:
-            self._ensure_visible(self._selected[0])
-            self.pcanvas.goto_page(self._selected[0])
-        self.app.after_model_change()
-
-    # ------------------------------------------------------- traek og slip
-    # Moenstret er laant fra den gamle Treeview, men tre ting kunne IKKE porteres:
-    #   1. Museevents paa en flise er FLISE-relative -- de skal regnes om til
-    #      laerreds-koordinater via canvasx/canvasy.
-    #   2. En tk.Frame.place()'et paa et laerred positioneres i WIDGET-koordinater,
-    #      ikke laerreds-koordinater, og laerredet ruller under den. Treeview'ens
-    #      bbox var allerede viewport-relativ, derfor virkede den gamle kode.
-    #   3. Treeview'en auto-scrollede gratis under et traek. Uden det kan man ikke
-    #      traekke en side hen til en fil der ligger uden for skaermen.
-    DRAG_THRESHOLD = 5          # px foer et klik bliver til et traek
-    AUTOSCROLL_ZONE = 30        # px i top/bund der ruller
-    AUTOSCROLL_MS = 60
-
-    def _canvas_xy(self, event):
-        """Museevent (uanset hvilken widget den kom fra) -> laerreds-koordinater."""
-        return (self.canvas.canvasx(event.x_root - self.canvas.winfo_rootx()),
-                self.canvas.canvasy(event.y_root - self.canvas.winfo_rooty()))
-
-    def _on_tile_press(self, event, uid):
-        self._drag = {"uid": uid, "x": event.x_root, "y": event.y_root, "armed": False}
-
-    def _on_tile_motion(self, event):
-        d = self._drag
-        if not d:
-            return
-        if not d["armed"]:
-            if (abs(event.x_root - d["x"]) < self.DRAG_THRESHOLD
-                    and abs(event.y_root - d["y"]) < self.DRAG_THRESHOLD):
-                return
-            # Traekker man en flise der ikke var markeret, traekkes netop den.
-            if d["uid"] not in self._selected:
-                self._select(d["uid"])
-            d["armed"] = True
-            d["uids"] = self.selected_uids()
-            self._make_drag_ghost(len(d["uids"]))
-        if self._drag_ghost is not None:
-            self._drag_ghost.geometry("+%d+%d" % (event.x_root + 18, event.y_root + 12))
-        cx, cy = self._canvas_xy(event)
-        d["target"] = self._drop_target_at(cx, cy)
-        self._show_drop_indicator(d["target"])
-        self._autoscroll(event)
-
-    def _on_tile_release(self, event):
-        d, self._drag = self._drag, None
-        self._stop_autoscroll()
-        self._hide_drop_indicator()
-        self._destroy_drag_ghost()
-        if not d or not d.get("armed"):
-            return
-        target = d.get("target")
-        uids = d.get("uids") or []
-        if not target or not uids:
-            return
-        kind = target[0]
-        if kind == "into":
-            _k, dst_iid, visual = target
-            entry = self.app.model.entry_by_iid(dst_iid)
-            if entry is None:
-                return
-            pos = self._drop_position(entry, uids, visual)
-            # Slippes udsnittet praecis der hvor det allerede ligger, er der intet
-            # at fortryde -- undgaa et tomt undo-trin.
-            want = set(uids)
-            cur = [pg.uid for pg in entry.pages]
-            rest = [u for u in cur if u not in want]
-            if rest[:pos] + uids + rest[pos:] == cur:
-                return
-            self.app.undo_stack.push(
-                em.move_pages_cmd(self.app.model, uids, dst_iid, pos))
+        uid = cell["key"]
+        if mods & Qt.KeyboardModifier.ControlModifier:
+            # Ctrl-klik ER flervalg. Slaa fluebenene til med det samme, saa
+            # brugeren kan SE hvad der er valgt -- og fortsaette uden tastatur.
+            self.set_select_mode(True)
+            self.select(uid, additive=True)
+        elif mods & Qt.KeyboardModifier.ShiftModifier:
+            self.set_select_mode(True)
+            self.select(uid, extend=True)
+        elif self.select_mode:
+            # I "Vaelg sider" er et almindeligt klik additivt. Traekket bevares,
+            # men KUN naar klikket lagde siden TIL markeringen: fravaelger man en
+            # side, ville et efterfoelgende traek flytte noget man lige har
+            # sagt fra.
+            self.select(uid, additive=True)
+            if uid in self._selected:
+                self._drag_origin = event.position().toPoint()
+                self._drag_uid = uid
         else:
-            self.app.undo_stack.push(
-                em.extract_pages_cmd(self.app.model, uids, at_index=target[1]))
-        self.rebuild()
-        self.reselect(uids)
-        self.app.after_model_change()
+            if uid not in self._selected:
+                self.select(uid)
+            self._drag_origin = event.position().toPoint()
+            self._drag_uid = uid
 
-    @staticmethod
-    def _drop_position(entry, uids, visual):
-        """Visuel indsaetningsplads -> plads EFTER at de trukne sider er taget ud.
+    def mouseMoveEvent(self, event):  # noqa: N802 - Qt-API
+        if self._drag_origin is None or not (event.buttons() & Qt.MouseButton.LeftButton):
+            return super().mouseMoveEvent(event)
+        if (event.position().toPoint() - self._drag_origin).manhattanLength() < DRAG_THRESHOLD:
+            return
+        uid, self._drag_origin = self._drag_uid, None
+        if uid is None:
+            return
+        if uid not in self._selected:
+            self.select(uid)
+        self._start_page_drag(self.selected_uids())
 
-        ``_drop_target_at`` regner i den liste brugeren SER, hvor de trukne sider
-        stadig er med. ``move_pages`` indsaetter derimod i listen efter at de er
-        fjernet. Traekker man fremad inde i samme fil, skal pladsen derfor
-        reduceres med antallet af trukne sider der laa foer den -- ellers lander
-        siden i slutningen af filen i stedet for der hvor den blev sluppet.
-        """
-        want = set(uids)
-        before = sum(1 for pg in entry.pages[:visual] if pg.uid in want)
-        return max(0, visual - before)
+    def mouseReleaseEvent(self, event):  # noqa: N802 - Qt-API
+        self._drag_origin = None
+        self._drag_uid = None
+        super().mouseReleaseEvent(event)
 
-    def cancel_drag(self, event=None):
-        """Afbryd et igangvaerende traek (Escape, eller nedrivning af UI)."""
-        self._drag = None
+    def mouseDoubleClickEvent(self, event):  # noqa: N802 - Qt-API
+        cell = self._cell_at(event.position().toPoint())
+        if cell is not None and cell["kind"] == "tile":
+            self.page_activated.emit(cell["key"])
+
+    def contextMenuEvent(self, event):  # noqa: N802 - Qt-API
+        cell = self._cell_at(event.pos())
+        if cell is None:
+            return
+        if cell["kind"] == "header":
+            self.select_file(cell["entry"].iid)
+            self.context_file.emit(cell["entry"].iid, event.globalPos())
+        elif cell["kind"] == "tile":
+            # Et hoejreklik inde i en eksisterende markering bevarer den (som i
+            # Stifinder); ellers markerer det den flise man ramte.
+            if cell["key"] not in self._selected:
+                self.select(cell["key"])
+            self.context_page.emit(cell["key"], event.globalPos())
+
+    def wheelEvent(self, event):  # noqa: N802 - Qt-API
+        self.render_mgr.notify_activity()
+        super().wheelEvent(event)
+
+    def keyPressEvent(self, event):  # noqa: N802 - Qt-API
+        key = event.key()
+        step = {Qt.Key.Key_Down: self.cols, Qt.Key.Key_Up: -self.cols,
+                Qt.Key.Key_Right: 1, Qt.Key.Key_Left: -1}.get(key)
+        if step is None:
+            if key == Qt.Key.Key_PageDown:
+                step = self._page_step()
+            elif key == Qt.Key.Key_PageUp:
+                step = -self._page_step()
+            elif key == Qt.Key.Key_Home:
+                step = -10 ** 9
+            elif key == Qt.Key.Key_End:
+                step = 10 ** 9
+        if step is not None:
+            self._navigate(step)
+            event.accept()
+            return
+        if key in (Qt.Key.Key_Delete, Qt.Key.Key_Backspace):
+            self.view.delete_selected_key()
+            event.accept()
+            return
+        if event.matches(QKeySequence.StandardKey.SelectAll):
+            self._selected = list(self.page_order)
+            self._anchor_uid = self._selected[0] if self._selected else None
+            self._selected_file = None
+            if len(self._selected) > 1:
+                self.set_select_mode(True)
+            self.viewport().update()
+            self.selection_changed.emit()
+            event.accept()
+            return
+        if key == Qt.Key.Key_Escape and self.select_mode:
+            self.set_select_mode(False)
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
+    def _page_step(self) -> int:
+        rows = max(1, self.viewport().height() // self.cell_h)
+        return max(1, self.cols * rows)
+
+    def _navigate(self, step: int) -> None:
+        if not self.page_order:
+            return
+        self.render_mgr.notify_activity()
+        cur = self.selected_page_uid()
+        if cur in self.page_order:
+            i = self.page_order.index(cur)
+            i = max(0, min(len(self.page_order) - 1, i + step))
+        else:
+            i = 0 if step >= 0 else len(self.page_order) - 1
+        self.select_and_reveal(self.page_order[i])
+
+    # -------------------------------------------------- traek og slip
+    def _start_page_drag(self, uids: list[str]) -> None:
+        """Start et internt sidetraek.
+
+        Qt's ``QDrag`` giver traek-billedet, markoeren og selve traek-loekken --
+        8.x maatte selv lave et ``overrideredirect``-Toplevel, flytte det ved
+        hver musebevaegelse og huske paa PhotoImage-referencer."""
+        if not uids:
+            return
+        mime = QMimeData()
+        mime.setData(_PAGE_MIME, ("\n".join(uids)).encode("utf-8"))
+        drag = QDrag(self)
+        drag.setMimeData(mime)
+        drag.setPixmap(self._drag_pixmap(uids))
+        drag.setHotSpot(QPoint(20, 16))
+        drag.exec(Qt.DropAction.MoveAction)
+        self._drop_target = None
         self._stop_autoscroll()
-        self._hide_drop_indicator()
-        self._destroy_drag_ghost()
+        self.viewport().update()
 
-    # --- drop-maal -------------------------------------------------------
-    def _drop_target_at(self, cx, cy):
+    def _drag_pixmap(self, uids: list[str]) -> QPixmap:
+        """Miniature af den foerste side, med et antalsmaerke naar der er flere."""
+        base = None
+        found = self.app.model.page_by_uid(uids[0])
+        if found is not None:
+            pil = self.render_mgr.cache.get(self.tile_key(found[1]))
+            if pil is not None:
+                base = pil_to_pixmap(pil)
+        if base is None or base.isNull():
+            base = QPixmap(90, 60)
+            base.fill(QColor(theme.C["surface"]))
+        pm = QPixmap(base.size())
+        pm.setDevicePixelRatio(base.devicePixelRatio())
+        pm.fill(Qt.GlobalColor.transparent)
+        p = QPainter(pm)
+        p.setOpacity(0.85)
+        p.drawPixmap(0, 0, base)
+        p.setOpacity(1.0)
+        p.setPen(QPen(QColor(theme.C["border_strong"]), 1))
+        p.drawRect(0, 0, pm.width() - 1, pm.height() - 1)
+        if len(uids) > 1:
+            badge = "+%d" % (len(uids) - 1)
+            p.setFont(theme.font("small"))
+            fm = QFontMetrics(theme.font("small"))
+            w = fm.horizontalAdvance(badge) + 8
+            r = QRect(pm.width() - w - 2, 2, w, fm.height() + 2)
+            p.fillRect(r, QColor(theme.C["danger"]))
+            p.setPen(QColor(theme.C["selection_fg"]))
+            p.drawText(r, Qt.AlignmentFlag.AlignCenter, badge)
+        p.end()
+        return pm
+
+    def _drop_target_at(self, pos: QPoint):
         """-> ("into", file_iid, position) | ("extract", file_index) | None."""
+        x, y = pos.x(), pos.y() + self._offset()
         for cell in self.cells:
-            if not (cell["x"] <= cx <= cell["x"] + cell["w"]
-                    and cell["y"] <= cy <= cell["y"] + cell["h"]):
+            if not (cell["x"] <= x <= cell["x"] + cell["w"]
+                    and cell["y"] <= y <= cell["y"] + cell["h"]):
                 continue
             entry = cell["entry"]
             if cell["kind"] == "header":
                 return ("into", entry.iid, 0)
             if cell["kind"] == "locked":
                 return None
-            page = cell["page"]
             try:
-                pos = entry.pages.index(page)
+                pos_in = entry.pages.index(cell["page"])
             except ValueError:
                 return None
             # Venstre halvdel = foer flisen, hoejre halvdel = efter.
-            if cx > cell["x"] + cell["w"] / 2:
-                pos += 1
-            return ("into", entry.iid, pos)
+            if x > cell["x"] + cell["w"] / 2:
+                pos_in += 1
+            return ("into", entry.iid, pos_in)
         # Ikke over en celle: mellemrummet mellem to filgrupper betyder "riv ud
-        # som egen fil". GROUP_GAP er derfor bevidst bred nok til at kunne rammes.
-        return ("extract", self._file_index_at(cy))
+        # som egen fil". GROUP_GAP er bevidst bred nok til at kunne rammes.
+        return ("extract", self._file_index_at(y))
 
-    def _file_index_at(self, cy):
-        """Hvilket fil-indeks et punkt mellem grupperne svarer til."""
+    def _file_index_at(self, y) -> int:
         idx = len(self.app.model.files)
         for cell in self.cells:
             if cell["kind"] != "header":
                 continue
-            if cy < cell["y"]:
+            if y < cell["y"]:
                 idx = self.app.model.index_of_iid(cell["entry"].iid)
                 break
         return max(0, idx)
 
-    def drop_file_index(self, x_root, y_root):
-        """Fil-indeks for et Explorer-drop paa de givne skaermkoordinater.
-
-        Returnerer None hvis punktet ikke er over gitteret (kaldestedet bruger da
-        "end"). Retter samtidig at drops i sidevisningen foer altid landede
-        nederst, fordi den gamle hit-test kun kendte traeraekker."""
-        try:
-            cx = self.canvas.canvasx(x_root - self.canvas.winfo_rootx())
-            cy = self.canvas.canvasy(y_root - self.canvas.winfo_rooty())
-        except tk.TclError:
+    def drop_file_index(self, global_pos: QPoint):
+        """Fil-indeks for et Explorer-drop paa de givne skaermkoordinater, eller
+        None hvis punktet ikke er over gitteret."""
+        pos = self.viewport().mapFromGlobal(global_pos)
+        if not self.viewport().rect().contains(pos):
             return None
-        if not (0 <= x_root - self.canvas.winfo_rootx() <= self.canvas.winfo_width()):
-            return None
-        target = self._drop_target_at(cx, cy)
+        target = self._drop_target_at(pos)
         if target is None:
             return None
         if target[0] == "extract":
@@ -1105,414 +973,1310 @@ class PageView(ttk.Frame):
         idx = self.app.model.index_of_iid(target[1])
         return None if idx < 0 else idx
 
-    # --- visuelle hjaelpere ----------------------------------------------
-    def _drop_bar(self):
-        if getattr(self, "_dropbar", None) is None or not self._dropbar.winfo_exists():
-            self._dropbar = tk.Frame(self.canvas, background=_SELECT_RING)
-        return self._dropbar
+    def set_drop_highlight(self, on: bool) -> None:
+        self._drop_highlight = bool(on)
+        self.viewport().update()
 
-    def _show_drop_indicator(self, target):
-        """Vis hvor siden lander.
-
-        Bemaerk: et canvas-item duer IKKE her. Tk tegner altid indlejrede vinduer
-        (``create_window``) oeverst, saa en streg mellem fliserne laa under dem og
-        var usynlig. Indikatoren er derfor en rigtig widget, placeret i
-        VIEWPORT-koordinater og loeftet op over fliserne.
-        """
-        if not target:
-            self._hide_drop_indicator()
-            return
-        geom = (self._extract_bar_geometry(target[1]) if target[0] == "extract"
-                else self._into_bar_geometry(target))
-        if geom is None:
-            self._hide_drop_indicator()
-            return
-        cx, cy, w, h = geom
-        x = cx - self.canvas.canvasx(0)
-        y = cy - self.canvas.canvasy(0)
-        bar = self._drop_bar()
-        try:
-            bar.place(x=int(x), y=int(y), width=int(w), height=int(h))
-            bar.lift()
-        except tk.TclError:
-            pass
-        if target[0] == "extract":
-            self.app.set_status(_("Slip for at gøre siden til sin egen fil"))
-
-    def _into_bar_geometry(self, target):
-        """Lodret bjaelke praecis paa den plads siden indsaettes."""
-        _k, iid, visual = target
-        tiles = [c for c in self.cells
-                 if c["kind"] == "tile" and c["entry"].iid == iid]
-        if not tiles:
-            hdr = next((c for c in self.cells
-                        if c["kind"] == "header" and c["entry"].iid == iid), None)
-            return None if hdr is None else (hdr["x"], hdr["y"], 3, hdr["h"])
-        if visual < len(tiles):
-            cell = tiles[visual]
-            x = cell["x"]
+    def dragEnterEvent(self, event):  # noqa: N802 - Qt-API
+        mime = event.mimeData()
+        if mime.hasFormat(_PAGE_MIME):
+            event.acceptProposedAction()
+        elif mime.hasUrls():
+            self.set_drop_highlight(True)
+            event.acceptProposedAction()
         else:
-            cell = tiles[-1]
-            x = cell["x"] + cell["w"] - 3
-        return (x, cell["y"] + 4, 3, cell["h"] - 8)
+            event.ignore()
 
-    def _extract_band_y(self, file_index):
-        """Y-koordinaten paa udtraeks-baandet foran den givne fil (eller efter
-        den sidste, naar man slipper under alt indhold)."""
-        for c in self.cells:
-            if c["kind"] != "header":
-                continue
-            if self.app.model.index_of_iid(c["entry"].iid) == file_index:
-                return max(2, c["y"] - GROUP_GAP // 2)
-        return max(2, self.total_height - GROUP_GAP // 2)
+    def dragMoveEvent(self, event):  # noqa: N802 - Qt-API
+        mime = event.mimeData()
+        pos = event.position().toPoint()
+        if mime.hasFormat(_PAGE_MIME):
+            self._drop_target = self._drop_target_at(pos)
+            if self._drop_target and self._drop_target[0] == "extract":
+                self.app.set_status(_("Slip for at gøre siden til sin egen fil"))
+            self._maybe_autoscroll(pos)
+            self.viewport().update()
+            event.acceptProposedAction()
+        elif mime.hasUrls():
+            event.acceptProposedAction()
 
-    def _extract_bar_geometry(self, file_index):
-        """Vandret bjaelke i mellemrummet: her bliver siden sin egen fil."""
-        y = self._extract_band_y(file_index)
-        width = max(40, self.canvas.winfo_width() - 2 * PAD)
-        return (PAD, y - 1, width, 3)
+    def dragLeaveEvent(self, event):  # noqa: N802 - Qt-API
+        self._drop_target = None
+        self._stop_autoscroll()
+        self.set_drop_highlight(False)
+        self.viewport().update()
+        event.accept()
 
-    def _hide_drop_indicator(self):
-        bar = getattr(self, "_dropbar", None)
-        if bar is not None:
-            try:
-                bar.place_forget()
-            except tk.TclError:
-                pass
-
-    def _make_drag_ghost(self, count):
-        self._destroy_drag_ghost()
-        try:
-            g = tk.Toplevel(self)
-            g.overrideredirect(True)
-            g.attributes("-topmost", True)
-            g.attributes("-alpha", 0.7)
-            box = tk.Frame(g, background=theme.C["surface"], highlightthickness=1,
-                           highlightbackground=theme.C["border_strong"])
-            box.pack()
-            uid = self._selected[0] if self._selected else None
-            found = self.app.model.page_by_uid(uid) if uid else None
-            pil = None
-            if found is not None:
-                pil = self.render_mgr.cache.get(self._tile_key(found[1]))
-            if pil is not None:
-                photo = ImageTk.PhotoImage(pil)
-                lbl = tk.Label(box, image=photo, background=theme.C["surface"])
-                # Referencen SKAL leve paa viewet; en lokal ville blive
-                # garbage-collected og billedet ville forsvinde.
-                self._ghost_photo = photo
-                lbl.pack()
+    def dropEvent(self, event):  # noqa: N802 - Qt-API
+        mime = event.mimeData()
+        self._stop_autoscroll()
+        self.set_drop_highlight(False)
+        if mime.hasFormat(_PAGE_MIME):
+            target, self._drop_target = self._drop_target, None
+            uids = bytes(mime.data(_PAGE_MIME)).decode("utf-8").split("\n")
+            self.viewport().update()
+            self.view.commit_page_drop(uids, target)
+            event.acceptProposedAction()
+            return
+        if mime.hasUrls():
+            paths = [u.toLocalFile() for u in mime.urls() if u.toLocalFile()]
+            local = event.position().toPoint()
+            target = self._drop_target_at(local)
+            if target is None:
+                idx = None
+            elif target[0] == "extract":
+                idx = target[1]
             else:
-                tk.Label(box, text=_("%(n)d sider") % {"n": count}, padx=10, pady=8,
-                         background=theme.C["surface"],
-                         foreground=theme.C["text"]).pack()
-            if count > 1:
-                tk.Label(box, text="+%d" % (count - 1),
-                         background=theme.C["danger"],
-                         foreground=theme.C["selection_fg"],
-                         font=theme.FONTS["small"], padx=3).place(relx=1.0, rely=0.0,
-                                                                  anchor="ne")
-            self._drag_ghost = g
-        except tk.TclError:
-            self._drag_ghost = None
-
-    def _destroy_drag_ghost(self):
-        g, self._drag_ghost = getattr(self, "_drag_ghost", None), None
-        self._ghost_photo = None
-        if g is not None:
-            try:
-                g.destroy()
-            except tk.TclError:
-                pass
+                found = self.app.model.index_of_iid(target[1])
+                idx = None if found < 0 else found
+            self.external_drop.emit(paths, idx)
+            event.acceptProposedAction()
 
     # --- auto-scroll under traek -----------------------------------------
-    def _autoscroll(self, event):
-        y = event.y_root - self.canvas.winfo_rooty()
-        h = self.canvas.winfo_height()
-        direction = 0
-        if y < self.AUTOSCROLL_ZONE:
-            direction = -1
-        elif y > h - self.AUTOSCROLL_ZONE:
-            direction = 1
-        if direction == 0:
+    def _maybe_autoscroll(self, pos: QPoint) -> None:
+        h = self.viewport().height()
+        if pos.y() < AUTOSCROLL_ZONE:
+            self._autoscroll_dir = -1
+        elif pos.y() > h - AUTOSCROLL_ZONE:
+            self._autoscroll_dir = 1
+        else:
             self._stop_autoscroll()
             return
-        if self._autoscroll_after is None:
-            self._autoscroll_step(direction)
+        if not self._autoscroll.isActive():
+            self._autoscroll.start(AUTOSCROLL_MS)
 
-    def _autoscroll_step(self, direction):
-        self.canvas.yview_scroll(direction, "units")
-        self._refresh_visible()
-        if self._drag and self._drag.get("target"):
-            self._show_drop_indicator(self._drag["target"])
-        self._autoscroll_after = self.after(
-            self.AUTOSCROLL_MS, lambda: self._autoscroll_step(direction))
+    def _autoscroll_step(self) -> None:
+        sb = self.verticalScrollBar()
+        sb.setValue(sb.value() + self._autoscroll_dir * sb.singleStep())
 
-    def _stop_autoscroll(self):
-        if getattr(self, "_autoscroll_after", None) is not None:
+    def _stop_autoscroll(self) -> None:
+        self._autoscroll.stop()
+        self._autoscroll_dir = 0
+
+    def cancel_drag(self) -> None:
+        self._drop_target = None
+        self._drag_origin = None
+        self._stop_autoscroll()
+        self.viewport().update()
+
+
+class _FileItemDelegate(QStyledItemDelegate):
+    """Tegner en filpost som to linjer: navnet, og metadata daempet under.
+
+    Navnet og metalinjen laeses fra hver sin **item-rolle**, ikke fra én
+    ``"navn\\nmeta"``-streng. Det er ikke kosmetik: proppet ned i ``DisplayRole``
+    blev linjeskiftet fladet ud af viewets elide-tilstand, saa posten kom ud som
+    ``"Rapport.pd... - 4,3 KB"`` paa én linje. To roller kan ikke flettes.
+
+    Baggrunden (hover/markering) tegnes stadig af stilen, saa QSS'en gaelder.
+    """
+
+    META = Qt.ItemDataRole.UserRole + 1
+
+    def paint(self, painter, option, index):
+        opt = QStyleOptionViewItem(option)
+        self.initStyleOption(opt, index)
+        opt.text = ""                       # vi tegner selv teksten
+        widget = opt.widget
+        style = widget.style() if widget is not None else QApplication.style()
+        style.drawControl(QStyle.ControlElement.CE_ItemViewItem, opt, painter, widget)
+
+        r = opt.rect.adjusted(8, 5, -8, -5)
+        icon = index.data(Qt.ItemDataRole.DecorationRole)
+        if icon is not None and not icon.isNull():
+            sz = theme.ICON["small"]
+            icon.paint(painter, QRect(r.left(), r.top() + (r.height() - sz) // 2, sz, sz))
+            r.setLeft(r.left() + sz + theme.SPACE["sm"])
+
+        name = str(index.data(Qt.ItemDataRole.DisplayRole) or "")
+        meta = str(index.data(self.META) or "")
+        fm_name = QFontMetrics(theme.font("base"))
+        fm_meta = QFontMetrics(theme.font("small"))
+
+        painter.save()
+        painter.setFont(theme.font("base"))
+        painter.setPen(QColor(theme.C["text"]))
+        painter.drawText(
+            QRect(r.left(), r.top(), r.width(), fm_name.height()),
+            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+            fm_name.elidedText(name, Qt.TextElideMode.ElideMiddle, r.width()))
+        painter.setFont(theme.font("small"))
+        painter.setPen(QColor(theme.C["text_muted"]))
+        painter.drawText(
+            QRect(r.left(), r.top() + fm_name.height(), r.width(), fm_meta.height()),
+            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+            fm_meta.elidedText(meta, Qt.TextElideMode.ElideRight, r.width()))
+        painter.restore()
+
+    def sizeHint(self, option, index):
+        # Hoejden skal rumme BEGGE linjer plus luft. QSS'ens ``margin`` traekkes
+        # fra bagefter, saa der maa vaere plads til den ogsaa.
+        h = (QFontMetrics(theme.font("base")).height()
+             + QFontMetrics(theme.font("small")).height() + 18)
+        return QSize(120, h)
+
+
+class FileListPanel(QListWidget):
+    """Smal liste over de aabne filer.
+
+    Sidegitteret er fint til at arbejde i, men uoverskueligt naar der er mange
+    filer: filhovederne ligger spredt ud mellem hundredvis af fliser. Listen her
+    er et fast indeks -- klik paa en fil for at markere den og rulle hen til den.
+
+    Den genindfoerer **ikke** den gamle filvisning: den er en navigation, ikke en
+    redigeringsflade. Al mutation gaar fortsat gennem gitteret og modellen.
+    """
+
+    file_chosen = Signal(str)
+    files_reordered = Signal(list)         # ny iid-raekkefoelge
+    external_drop = Signal(list, object)   # stier, indsaettelses-indeks
+
+    def __init__(self, parent, app):
+        super().__init__(parent)
+        self.app = app
+        self._syncing = False
+        self.setObjectName("FileList")
+        # Traek-og-slip: omordn filer ved at traekke dem, og tag imod filer der
+        # slippes fra Stifinder. Vi bruger IKKE ``InternalMove``: Qt ville selv
+        # flytte raekkerne, og saa ville listen og modellen vaere ude af trit
+        # indtil naeste rebuild -- og flytningen kunne ikke fortrydes.
+        self.setDragEnabled(True)
+        self.setAcceptDrops(True)
+        self.setDropIndicatorShown(True)
+        self.setDragDropMode(QAbstractItemView.DragDropMode.DragDrop)
+        # **CopyAction, ikke MoveAction.** ``QAbstractItemView.startDrag``
+        # fjerner selv den trukne raekke, naar traekket ender som et
+        # ``MoveAction`` -- og det sker EFTER vores ``dropEvent``, altsaa oven i
+        # den liste vi lige har genopbygget fra modellen. Resultatet var at en
+        # fil forsvandt fra listen (men blev i modellen). Vi flytter selv i
+        # modellen, saa Qt skal holde fingrene fra raekkerne.
+        self.setDefaultDropAction(Qt.DropAction.CopyAction)
+        # Qt's egen drop-indikator er en haarfin streg, der naesten forsvinder i
+        # windows11-stilen. Vi tegner vores egen (se ``paintEvent``).
+        self.setDropIndicatorShown(False)
+        self._drop_row_hint = None
+        self._dragging_iid = None
+        self.setFrameShape(QFrame.Shape.NoFrame)
+        self.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self.setUniformItemSizes(False)
+        self.setWordWrap(False)
+        # Delegaten eliderer selv hver linje for sig; viewets egen elide ville
+        # gaelde hele posten under ét.
+        self.setTextElideMode(Qt.TextElideMode.ElideNone)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.setItemDelegate(_FileItemDelegate(self))
+        self.itemSelectionChanged.connect(self._on_selection)
+
+    def rebuild(self) -> None:
+        """Genopbyg listen fra modellen og bevar markeringen.
+
+        Hver post er **navn** paa foerste linje og **oprettelsesdato · stoerrelse**
+        paa anden -- de tre ting man skelner to ens navngivne filer paa. Sidetallet
+        staar i tooltippet sammen med den fulde sti; det kan man se i gitteret.
+        """
+        current = None
+        item = self.currentItem()
+        if item is not None:
+            current = item.data(Qt.ItemDataRole.UserRole)
+        self.blockSignals(True)
+        self._syncing = True
+        try:
+            self.clear()
+            for entry in self.app.model.files:
+                item = QListWidgetItem(Path(entry.path).name)
+                item.setData(_FileItemDelegate.META, self._meta_line(entry))
+                item.setData(Qt.ItemDataRole.UserRole, entry.iid)
+                item.setToolTip(self._tooltip(entry))
+                lock = ThumbnailGrid._lock_icon_for(entry)
+                if lock is not None:
+                    name, color = lock
+                    item.setIcon(icons_vector.qicon(name, theme.ICON["small"], color))
+                self.addItem(item)
+                if entry.iid == current:
+                    self.setCurrentItem(item)
+        finally:
+            self._syncing = False
+            self.blockSignals(False)
+
+    @staticmethod
+    def _page_count(entry) -> int:
+        if entry.pages_loaded:
+            return len(entry.pages)
+        if entry.kind == em.KIND_IMAGE:
+            return 1
+        return entry.source_page_count
+
+    @staticmethod
+    def _meta_line(entry) -> str:
+        """``"25/12-2025 · 1,4 MB"``. Felter der endnu ikke er laest udelades,
+        saa linjen aldrig viser en tom plads eller et 0."""
+        parts = []
+        date = ThumbnailGrid._fmt_date(entry.creation_date)
+        if date:
+            parts.append(date)
+        size = int(getattr(entry, "size_bytes", 0) or 0)
+        if size:
+            parts.append(qt_util.fmt_bytes(size))
+        return "  ·  ".join(parts) if parts else _("Læser…")
+
+    def _tooltip(self, entry) -> str:
+        n = self._page_count(entry)
+        pages = _("%(n)d sider") % {"n": n} if n != 1 else _("1 side")
+        return "%s\n%s" % (entry.path, pages)
+
+    def select_file(self, iid) -> None:
+        """Afspejl gitterets markering uden at sende signalet retur."""
+        self._syncing = True
+        try:
+            if iid is None:
+                self.clearSelection()
+                self.setCurrentItem(None)
+            else:
+                for i in range(self.count()):
+                    it = self.item(i)
+                    if it.data(Qt.ItemDataRole.UserRole) == iid:
+                        self.setCurrentItem(it)
+                        break
+        finally:
+            self._syncing = False
+
+    def _on_selection(self) -> None:
+        if self._syncing:
+            return
+        item = self.currentItem()
+        if item is not None:
+            self.file_chosen.emit(item.data(Qt.ItemDataRole.UserRole))
+
+    # ----------------------------------------------------------- traek/slip
+    def _drop_row(self, pos) -> int:
+        """Hvilken raekke et slip paa ``pos`` betyder "indsaet foran"."""
+        item = self.itemAt(pos)
+        if item is None:
+            return self.count()
+        row = self.row(item)
+        r = self.visualItemRect(item)
+        return row + 1 if pos.y() > r.center().y() else row
+
+    def startDrag(self, supported_actions):  # noqa: N802 - Qt-API
+        """Husk hvad der traekkes, og koer traekket som en KOPI.
+
+        ``currentItem()`` er ikke paalideligt som "den trukne post": traekker man
+        en post uden foerst at markere den, peger den paa noget andet."""
+        item = self.currentItem()
+        self._dragging_iid = (item.data(Qt.ItemDataRole.UserRole)
+                              if item is not None else None)
+        super().startDrag(Qt.DropAction.CopyAction)
+        self._dragging_iid = None
+        self._set_drop_row(None)
+
+    def dragEnterEvent(self, event):  # noqa: N802 - Qt-API
+        mime = event.mimeData()
+        if event.source() is self or mime.hasUrls():
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def dragMoveEvent(self, event):  # noqa: N802 - Qt-API
+        if event.source() is self or event.mimeData().hasUrls():
+            self._set_drop_row(self._drop_row(event.position().toPoint()))
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def dragLeaveEvent(self, event):  # noqa: N802 - Qt-API
+        self._set_drop_row(None)
+        event.accept()
+
+    def _set_drop_row(self, row) -> None:
+        if row != self._drop_row_hint:
+            self._drop_row_hint = row
+            self.viewport().update()
+
+    def paintEvent(self, event):  # noqa: N802 - Qt-API
+        super().paintEvent(event)
+        row = self._drop_row_hint
+        if row is None:
+            return
+        # Indsaetnings-karet paa tvaers af listen, med vinger i begge ender, saa
+        # det er tydeligt MELLEM hvilke to filer der slippes.
+        from PySide6.QtGui import QPainter as _QP
+        p = _QP(self.viewport())
+        accent = QColor(theme.C["drop_line"])
+        w = self.viewport().width()
+        if self.count() == 0:
+            y = 4
+        elif row >= self.count():
+            y = self.visualItemRect(self.item(self.count() - 1)).bottom()
+        else:
+            y = self.visualItemRect(self.item(row)).top()
+        y = max(2, min(self.viewport().height() - 3, y))
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(accent)
+        p.drawRoundedRect(QRectF(6, y - 1.5, w - 12, 3), 1.5, 1.5)
+        p.drawEllipse(QRectF(2, y - 4, 8, 8))
+        p.drawEllipse(QRectF(w - 10, y - 4, 8, 8))
+        p.end()
+
+    def dropEvent(self, event):  # noqa: N802 - Qt-API
+        pos = event.position().toPoint()
+        row = self._drop_row(pos)
+        self._set_drop_row(None)
+        if event.source() is self:
+            iid = self._dragging_iid
+            if iid is None:
+                item = self.currentItem()
+                iid = item.data(Qt.ItemDataRole.UserRole) if item is not None else None
+            if iid is None:
+                event.ignore()
+                return
+            self.files_reordered.emit([iid, row])
+            # Ikke ``acceptProposedAction`` (= Move): saa ville view'et fjerne
+            # raekken bagefter. Se kommentaren ved setDefaultDropAction.
+            event.setDropAction(Qt.DropAction.CopyAction)
+            event.accept()
+            return
+        urls = [u.toLocalFile() for u in event.mimeData().urls() if u.toLocalFile()]
+        if urls:
+            self.external_drop.emit(urls, row)
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+
+class PageView(QWidget):
+    """Filliste + sidegitter + kontinuerlig fremviser i et delt panel."""
+
+    def __init__(self, parent, app):
+        super().__init__(parent)
+        self.app = app
+        self.render_mgr = app.page_render_mgr
+        self.active_tool = "hand"
+        self._anno_color = (1.0, 0.0, 0.0)
+        self._tool_buttons: dict[str, QToolButton] = {}
+        self._tool_icons: dict[str, str] = {}
+        self._plain_icons: list = []
+
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(theme.SPACE["md"], theme.SPACE["sm"],
+                               theme.SPACE["md"], theme.SPACE["sm"])
+        lay.setSpacing(theme.SPACE["sm"])
+
+        self.splitter = QSplitter(Qt.Orientation.Horizontal, self)
+        # Fillisten MAA kunne klappes helt sammen -- den er en bekvemmelighed,
+        # ikke en fast del af fladen. De to andre ruder maa ikke.
+        self.splitter.setChildrenCollapsible(True)
+        lay.addWidget(self.splitter, 1)
+
+        self.file_list = FileListPanel(self.splitter, app)
+        self.file_list.file_chosen.connect(self._on_file_chosen)
+        self.file_list.files_reordered.connect(self._on_files_reordered)
+        self.file_list.external_drop.connect(self._on_external_drop)
+        self.splitter.addWidget(self.file_list)
+
+        left = QWidget(self.splitter)
+        ll = QVBoxLayout(left)
+        ll.setContentsMargins(0, 0, 0, 0)
+        ll.setSpacing(theme.SPACE["xs"])
+        self.grid = ThumbnailGrid(left, self)
+        ll.addWidget(self.grid, 1)
+        ll.addWidget(self._build_tile_bar(left))
+        self.splitter.addWidget(left)
+
+        right = QWidget(self.splitter)
+        rl = QVBoxLayout(right)
+        rl.setContentsMargins(0, 0, 0, 0)
+        rl.setSpacing(theme.SPACE["xs"])
+        rl.addWidget(self._build_anno_toolbar(right))
+        self.pcanvas = PageCanvas(right, self.app)
+        self.pcanvas.zoom_changed.connect(self._on_zoom_change)
+        self.pcanvas.page_changed.connect(self._highlight_page)
+        rl.addWidget(self.pcanvas, 1)
+        self.splitter.addWidget(right)
+        self.splitter.setCollapsible(1, False)
+        self.splitter.setCollapsible(2, False)
+        self.splitter.setStretchFactor(0, 0)
+        self.splitter.setStretchFactor(1, 1)
+        self.splitter.setStretchFactor(2, 2)
+        # Gitteret skal kunne vise mindst to fliser ved siden af hinanden --
+        # ellers bliver det en enkelt lodret stribe, som er ubrugelig.
+        left.setMinimumWidth(2 * self.grid.cell_w + 2 * PAD + 20)
+        self.file_list.setMinimumWidth(120)
+        self.file_list.setMaximumWidth(320)
+        self.splitter.setSizes([self.FILE_LIST_W, 320, 700])
+
+        self.grid.page_activated.connect(self.pcanvas.goto_page)
+        self.grid.selection_changed.connect(self._report_selection)
+        self.grid.context_page.connect(self._page_context_menu)
+        self.grid.context_file.connect(self._file_context_menu)
+        self.grid.external_drop.connect(self._on_external_drop)
+
+        # Velkomsten ligger som et LAG over det hele -- ikke som en tredje
+        # tilstand i splitteren. Panelernes bredder skal overleve, at man
+        # tømmer kurven og fylder den igen, og et lag rører dem ikke.
+        # Den tager ikke selv imod drop: ``MainWindow`` lytter paa vinduet, saa
+        # et traek fra Stifinder falder igennem af sig selv.
+        self._welcome_on = False
+        self.welcome = welcome.WelcomeView(self)
+        self.welcome.add_files_requested.connect(self.app._add)
+        self.welcome.hide()
+
+        # Vaerktoejet saettes foerst her: baren bygges foer fremviseren, og
+        # ``_set_tool`` taler med begge.
+        self._set_tool("hand")
+        self._update_welcome()
+
+    # ------------------------------------------------------------ velkomst
+    def _update_welcome(self) -> None:
+        """Vis velkomsten naar der ingen filer er -- og kun da.
+
+        Tilstanden holdes i et flag og ikke i ``isVisible()``: et barn af et
+        vindue der endnu ikke er vist, rapporterer *ikke* sig selv som synligt,
+        saa opstarten ville ellers gaa i ring."""
+        empty = not self.app.model.files
+        if empty == self._welcome_on:
+            return
+        self._welcome_on = empty
+        self.welcome.setGeometry(self.rect())
+        self.welcome.setVisible(empty)
+        if empty:
+            self.welcome.raise_()
+
+    def resizeEvent(self, event):  # noqa: N802 - Qt-API
+        super().resizeEvent(event)
+        # Uden betingelse: laget skal have den rigtige geometri, ogsaa foer
+        # vinduet er vist foerste gang.
+        self.welcome.setGeometry(self.rect())
+
+    def _build_tile_bar(self, parent) -> QWidget:
+        """Skyder til miniature-stoerrelsen, hoejrestillet som i Stifinder."""
+        bar = QWidget(parent)
+        row = QHBoxLayout(bar)
+        row.setContentsMargins(theme.SPACE["sm"], 0, theme.SPACE["sm"],
+                               theme.SPACE["xxs"])
+        row.setSpacing(theme.SPACE["xs"])
+
+        self._file_toggle = QToolButton(bar)
+        self._file_toggle.setObjectName("ToolIcon")
+        self._file_toggle.setCheckable(True)
+        self._file_toggle.setChecked(True)
+        self._file_toggle.setIcon(icons_vector.qicon("panel_left", theme.ICON["small"]))
+        self._file_toggle.setIconSize(QSize(theme.ICON["small"], theme.ICON["small"]))
+        self._file_toggle.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._file_toggle.toggled.connect(self.set_file_list_visible)
+        Tooltip.attach(self._file_toggle, _("Vis eller skjul fillisten"))
+        self._plain_icons.append((self._file_toggle, "panel_left", theme.ICON["small"], None))
+        row.addWidget(self._file_toggle)
+
+        # "Vaelg sider" staar ved siden af filliste-knappen: begge aendrer hvad
+        # man SER paa fladen, ikke hvad der staar i dokumentet.
+        self._select_toggle = QToolButton(bar)
+        self._select_toggle.setObjectName("ToolIcon")
+        self._select_toggle.setCheckable(True)
+        self._select_toggle.setIcon(icons_vector.qicon("select_pages",
+                                                       theme.ICON["small"]))
+        self._select_toggle.setIconSize(QSize(theme.ICON["small"], theme.ICON["small"]))
+        self._select_toggle.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._select_toggle.toggled.connect(self.grid.set_select_mode)
+        # Slaar gitteret selv tilstanden til (Ctrl-klik, Ctrl+A), skal knappen
+        # foelge med -- ellers viser den noget andet end fladen goer.
+        self.grid.select_mode_changed.connect(self._select_toggle.setChecked)
+        Tooltip.attach(self._select_toggle,
+                       _("Vælg flere sider med flueben. Slås også til af Ctrl-klik."))
+        self._plain_icons.append((self._select_toggle, "select_pages",
+                                  theme.ICON["small"], None))
+        row.addWidget(self._select_toggle)
+        row.addStretch(1)
+
+        small = QLabel(bar)
+        small.setPixmap(icons_vector.qpixmap("zoom_out", theme.ICON["tiny"],
+                                             theme.C["text_muted"]))
+        row.addWidget(small)
+
+        self._tile_slider = QSlider(Qt.Orientation.Horizontal, bar)
+        self._tile_slider.setRange(TILE_SCALE_MIN, TILE_SCALE_MAX)
+        self._tile_slider.setSingleStep(10)
+        self._tile_slider.setPageStep(20)
+        self._tile_slider.setValue(self.grid.tile_scale)
+        self._tile_slider.setFixedWidth(120)
+        self._tile_slider.setSizePolicy(QSizePolicy.Policy.Fixed,
+                                        QSizePolicy.Policy.Fixed)
+        Tooltip.attach(self._tile_slider,
+                       lambda: _("Miniaturestørrelse: %d %%") % self.grid.tile_scale)
+        self._tile_slider.valueChanged.connect(self.grid.set_tile_scale)
+        row.addWidget(self._tile_slider)
+
+        big = QLabel(bar)
+        big.setPixmap(icons_vector.qpixmap("zoom_in", theme.ICON["small"],
+                                           theme.C["text_muted"]))
+        row.addWidget(big)
+        self._tile_zoom_labels = ((small, "zoom_out", theme.ICON["tiny"]),
+                                  (big, "zoom_in", theme.ICON["small"]))
+        return bar
+
+    FILE_LIST_W = 190
+
+    def set_file_list_visible(self, on: bool) -> None:
+        """Klap fillisten sammen eller ud.
+
+        Bredden tages fra (og gives tilbage til) gitteret ved siden af, saa
+        fremviseren til hoejre ikke flytter sig."""
+        files, grid, viewer = self.splitter.sizes()
+        if on:
+            if files < 40:
+                self.splitter.setSizes(
+                    [self.FILE_LIST_W, max(160, grid - self.FILE_LIST_W), viewer])
+        else:
+            self.splitter.setSizes([0, files + grid, viewer])
+        if self._file_toggle.isChecked() != on:
+            self._file_toggle.setChecked(on)
+
+    def tile_scale(self) -> int:
+        return self.grid.tile_scale
+
+    def set_tile_scale(self, percent) -> None:
+        try:
+            percent = int(percent)
+        except (TypeError, ValueError):
+            return
+        self._tile_slider.setValue(percent)     # valueChanged driver gitteret
+
+    def _on_files_reordered(self, payload) -> None:
+        """Slip i fillisten: flyt filen (med sine udtrukne boern) til den plads.
+
+        Boernene klaeber til deres moder i ``sort_order()``, saa en flytning der
+        efterlod dem ville se ud som om de sprang tilbage. Derfor flyttes hele
+        blokken -- praecis som "Flyt øverst"/"Flyt nederst" gør."""
+        iid, row = payload[0], int(payload[1])
+        model = self.app.model
+        if model.entry_by_iid(iid) is None:
+            return
+        order = [f.iid for f in model.files]
+        block = [iid] + [f.iid for f in model.files if f.origin_iid == iid]
+        # Indsaettelsespladsen regnes i den liste brugeren SER. ``anchor`` er
+        # den fil der skal ende EFTER blokken; efter at blokken er taget ud,
+        # findes pladsen ved at slaa ankeret op i resten.
+        anchor = order[row] if 0 <= row < len(order) else None
+        if anchor is not None and anchor in set(block):
+            return          # sluppet paa sig selv -- ingen flytning
+        rest = [i for i in order if i not in set(block)]
+        at = rest.index(anchor) if anchor in rest else len(rest)
+        new_order = rest[:at] + block + rest[at:]
+        if new_order == order:
+            return
+        self.app.undo_stack.push(em.reorder_files_cmd(model, new_order))
+        self.rebuild()
+        self.grid.select_file(iid)
+        self.app.after_model_change()
+
+    def _on_file_chosen(self, iid: str) -> None:
+        """Klik i fillisten: markér filen og rul hen til dens hoved."""
+        self.grid.select_file(iid)
+        self.grid.ensure_visible("h:" + iid)
+        self.grid.viewport().update()
+
+    def refresh_themed_icons(self) -> None:
+        """Gentegn vaerktoejslinjens ikoner efter et lys/moerk-skift."""
+        size = theme.ICON["tool"]
+        for btn, name, sz, color_key in list(self._plain_icons):
             try:
-                self.after_cancel(self._autoscroll_after)
-            except (tk.TclError, ValueError):
+                btn.setIcon(icons_vector.qicon(
+                    name, sz, theme.C[color_key] if color_key else None))
+            except RuntimeError:
                 pass
-            self._autoscroll_after = None
+        for name, btn in self._tool_buttons.items():
+            try:
+                btn.setIcon(icons_vector.qicon(
+                    self._tool_icons[name], size,
+                    self._tool_color(name, name == self.active_tool)))
+            except RuntimeError:
+                pass
+        try:
+            self._color_btn.setIcon(icons_vector.swatch_qicon(
+                self._anno_color_hex(), size))
+        except RuntimeError:
+            pass
+        for label, name, sz in getattr(self, "_tile_zoom_labels", ()):
+            try:
+                label.setPixmap(icons_vector.qpixmap(name, sz, theme.C["text_muted"]))
+            except RuntimeError:
+                pass
+        self.file_list.rebuild()
+        self.file_list.select_file(self.grid.selected_file())
+        self.grid.viewport().update()
+        self.pcanvas.viewport().update()
+        self.welcome.refresh_theme()
 
-    # --- smaa hjaelpere main_app kalder ----------------------------------
-    def reselect(self, uids):
-        """Genskab en markering efter en rebuild (uids overlever kommandoerne)."""
-        live = set(self.page_order)
-        keep = [u for u in uids if u in live]
+    # ---------------------------------------------------------- delegering
+    def rebuild(self) -> None:
+        self.grid.rebuild()
+        self.file_list.rebuild()
+        self.file_list.select_file(self.grid.selected_file())
+        self.pcanvas.set_document()
+        self._update_welcome()
+
+    def refresh_header(self, iid) -> None:
+        """Hovedet males af gitteret, saa en gentegning er alt der skal til.
+        Fillisten viser samme navn/haengelaas og opdateres med."""
+        self.grid.viewport().update()
+        self.file_list.rebuild()
+        self.file_list.select_file(self.grid.selected_file())
+
+    def selected_uids(self) -> list:
+        return self.grid.selected_uids()
+
+    def selected_file(self):
+        return self.grid.selected_file()
+
+    def selected_page_uid(self):
+        return self.grid.selected_page_uid()
+
+    def page_number_label(self, uid):
+        return self.grid.page_number_label(uid)
+
+    def select_and_reveal(self, uid) -> None:
+        self.grid.select_and_reveal(uid)
+
+    def reselect(self, uids) -> None:
+        self.grid.reselect(uids)
+
+    def cancel_drag(self) -> None:
+        self.grid.cancel_drag()
+
+    def set_drop_highlight(self, on: bool) -> None:
+        self.grid.set_drop_highlight(on)
+        self.welcome.set_drop_highlight(on)
+
+    def drop_file_index(self, global_pos):
+        return self.grid.drop_file_index(global_pos)
+
+    def setFocus(self):  # noqa: N802 - Qt-API
+        self.grid.setFocus()
+
+    def _on_external_drop(self, paths, index) -> None:
+        """Filer slupket fra Stifinder -- baade paa gitteret og paa fillisten."""
+        supported = {".pdf", ".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".tif"}
+        keep = [p for p in paths
+                if p and os.path.exists(p) and Path(p).suffix.lower() in supported]
         if not keep:
             return
-        old = set(self._selected)
-        self._selected = [u for u in self.page_order if u in set(keep)]
-        self._anchor_uid = self._selected[0]
-        self._selected_file = None
-        self._repaint_selection(old)
-        self._ensure_visible(self._selected[0])
-        self._report_selection()
+        added = []
+        at = "end" if index is None else index
+        for p in keep:
+            entry = self.app._add_file_entry(p, index=at)
+            if entry is not None:
+                added.append(entry)
+                if at != "end":
+                    at += 1
+        self.app._mark_for_unlock_prompt(added)
+        self.app._load_metadata_async(added)
+        self.app._after_files_added()
 
-    def activate_crop_tool(self):
-        """Kommandobarens Beskær: slaa beskaerings-vaerktoejet til i fremviseren."""
-        self._tool_var.set("crop")
-        self.active_tool = "crop"
-        self.pcanvas.set_tool("crop")
-        self._refresh_tool_icons()
-        self.app.set_status(_("Træk en ramme på siden for at beskære den"))
+    # ------------------------------------------------------------ status
+    def _report_selection(self) -> None:
+        iid = self.grid.selected_file()
+        self.file_list.select_file(iid)
+        if iid:
+            entry = self.app.model.entry_by_iid(iid)
+            if entry is not None:
+                self.app.set_status(_("Fil valgt: %s") % Path(entry.path).name)
+            return
+        sel = self.grid.selected_uids()
+        if len(sel) > 1:
+            self.app.set_status(_("%(s)d sider valgt") % {"s": len(sel)})
+        elif sel:
+            idx = self.grid.page_order.index(sel[0]) + 1
+            self.app.set_status(_("Side %(i)d af %(n)d")
+                                % {"i": idx, "n": len(self.grid.page_order)})
+        else:
+            self.app.set_status()
 
-    # ---------------------------------------------------- annotation toolbar
-    # Vaerktoejsgrupper: (tool_id, ikonnavn, tooltip). Adskilt af separatorer.
-    def _build_anno_toolbar(self, parent):
-        """Vaerktoejslinje til sidevisningens annotations-/maskeringsvaerktoejer +
-        zoom. Grupperet med smaa overskrifter (Zoom · Vælg · Marker · Fremhæv ·
-        Masker) adskilt af separatorer. Rene ikonknapper med hover-tooltip; kun
-        det valgte vaerktoejs ikon farves (accent, eller roedt for maskering).
-        Driver PageCanvas.
+    def _highlight_page(self, uid) -> None:
+        """Kaldes naar fremviseren scroller til en ny side.
+
+        Den maa IKKE flytte markeringen: ``goto_page`` klamper ved dokumentets
+        slutning, saa den viste side kan vaere en SENERE end den man netop
+        pilede hen til -- og markeringen ville hoppe foran. Her opdateres kun
+        statuslinjen."""
+        try:
+            idx = self.grid.page_order.index(uid) + 1
+        except ValueError:
+            return
+        if self.grid.selected_uids() or self.grid.selected_file():
+            return
+        self.app.set_status(_("Side %(i)d af %(n)d")
+                            % {"i": idx, "n": len(self.grid.page_order)})
+
+    # --------------------------------------------------------- kontekstmenu
+    def _page_context_menu(self, uid: str, global_pos) -> None:
+        menu = QMenu(self)
+        menu.addAction(_("Roter venstre"), lambda: self._rotate_ctx(uid, -90))
+        menu.addAction(_("Roter højre"), lambda: self._rotate_ctx(uid, 90))
+        menu.addSeparator()
+        targets = self._ctx_targets(uid)
+        export = menu.addMenu(_("Eksportér side") if len(targets) == 1
+                              else _("Eksportér %d sider") % len(targets))
+        for fmt, label in (("pdf", "PDF"), ("md", "Markdown"), ("epub", "ePub"),
+                           ("jpg", "JPG"), ("png", "PNG")):
+            export.addAction(label,
+                             lambda f=fmt, t=tuple(targets): self.app.export_pages(list(t), f))
+        menu.addAction(_("Kopiér til udklipsholder…"),
+                       lambda t=tuple(targets): self.app.copy_to_clipboard(list(t)))
+        menu.addSeparator()
+        menu.addAction(_("Slet side"), lambda: self.delete_pages(self._ctx_targets(uid)))
+        menu.exec(global_pos)
+
+    def _file_context_menu(self, iid: str, global_pos) -> None:
+        entry = self.app.model.entry_by_iid(iid)
+        menu = QMenu(self)
+        unlock = menu.addAction(_("Lås op"), lambda: self.app.unlock_file(iid))
+        unlock.setEnabled(entry is not None and entry.enc_key == pdf_utils.ENC_ENCRYPTED)
+        menu.addAction(_("Vælg alle sider i filen"),
+                       lambda: self.grid.select_all_in_file(iid))
+        menu.addAction(_("Kopiér til udklipsholder…"),
+                       lambda: self.app.copy_to_clipboard(
+                           [p.uid for p in (entry.pages if entry else ())]))
+        menu.addSeparator()
+        menu.addAction(_("Slet fil"), lambda: self.app.delete_file(iid))
+        menu.exec(global_pos)
+
+    def _ctx_targets(self, uid: str) -> list:
+        """Klikkede man inde i en flermarkering, gaelder handlingen hele
+        markeringen; ellers kun den flise man ramte."""
+        sel = self.grid.selected_uids()
+        return sel if uid in sel else [uid]
+
+    def _rotate_ctx(self, uid, delta) -> None:
+        self.rotate_pages(self._ctx_targets(uid), delta)
+
+    def delete_selected_key(self) -> None:
+        sel = self.grid.selected_uids()
+        if sel:
+            self.delete_pages(sel)
+        elif self.grid.selected_file():
+            self.app.delete_file(self.grid.selected_file())
+
+    # ------------------------------------------------------------ mutation
+    def rotate_selected(self, delta) -> None:
+        """Kommandobarens roter-knapper. Gaar gennem :meth:`rotate_pages`, IKKE
+        gennem fremviseren: den ville kun genopbygge den store visning, saa
+        miniaturen beholdt sit gamle billede."""
+        uids = self.grid.selected_uids()
+        if uids:
+            self.rotate_pages(uids, delta)
+
+    def rotate_pages(self, uids, delta) -> None:
+        """Roter sider som ÉN undo-handling og opdater fliserne straks.
+
+        Rotation er ikke en render-invalidering: den cachede miniature roteres
+        paa stedet (sub-ms) og gemmes under den nye noegle, saa der er nul
+        ``PDF_LOCK``-trafik."""
+        uids = [u for u in uids if self.app.model.page_by_uid(u)]
+        if not uids:
+            return
+        pages = {u: self.app.model.page_by_uid(u)[1] for u in uids}
+        cached = {u: self.render_mgr.cache.get(self.grid.tile_key(p))
+                  for u, p in pages.items()}
+        self.app.undo_stack.push(em.rotate_pages_cmd(self.app.model, uids, delta))
+        for uid in uids:
+            self._retile_after_rotate(uid, pages[uid], cached.get(uid), delta)
+        self.pcanvas.set_document()
+
+    def _retile_after_rotate(self, uid, page, cached, delta) -> None:
+        """Genbrug den allerede renderede miniature i stedet for at rendere igen."""
+        if cached is not None:
+            try:
+                rotated = cached.rotate(-delta, expand=True)
+                rotated.thumbnail(self.grid.tile_img, Image.Resampling.LANCZOS)
+                self.render_mgr.cache.put(self.grid.tile_key(page), rotated)
+                self.grid._set_tile_image(uid, rotated)
+                return
+            except Exception as e:
+                logger.debug("Kunne ikke rotere cachet miniature: %s", e)
+        self.grid._pix_key.pop(uid, None)
+        self.grid._request_visible_renders()
+
+    def delete_pages(self, uids) -> None:
+        """Haard fjernelse fra modellen (kildefilerne roeres ikke) som ÉN
+        undo-handling. Toemmes en fil helt, fjernes hele ``FileEntry``."""
+        uids = [u for u in uids if self.app.model.page_by_uid(u)]
+        if not uids:
+            return
+        # Efter sletningen markeres naboen: foerste overlevende EFTER den sidst
+        # slettede side, ellers den sidste overlevende foer den.
+        order = self.grid.page_order
+        doomed = set(uids)
+        last = max((i for i, u in enumerate(order) if u in doomed), default=-1)
+        nxt = next((u for u in order[last + 1:] if u not in doomed), None)
+        if nxt is None:
+            nxt = next((u for u in reversed(order[:last]) if u not in doomed), None)
+        self.app.undo_stack.push(em.delete_pages_cmd(self.app.model, uids))
+        self.rebuild()
+        if nxt:
+            self.grid.select_and_reveal(nxt)
+        self.app.after_model_change()
+
+    def commit_page_drop(self, uids, target) -> None:
+        """Afslut et sidetraek: flyt ind i en fil, eller riv ud som egen fil."""
+        uids = [u for u in uids if self.app.model.page_by_uid(u)]
+        if not target or not uids:
+            return
+        if target[0] == "into":
+            _k, dst_iid, visual = target
+            entry = self.app.model.entry_by_iid(dst_iid)
+            if entry is None:
+                return
+            pos = self._drop_position(entry, uids, visual)
+            # Slippes udsnittet praecis der hvor det allerede ligger, er der
+            # intet at fortryde -- undgaa et tomt undo-trin.
+            want = set(uids)
+            cur = [pg.uid for pg in entry.pages]
+            rest = [u for u in cur if u not in want]
+            if rest[:pos] + uids + rest[pos:] == cur:
+                return
+            self.app.undo_stack.push(em.move_pages_cmd(self.app.model, uids, dst_iid, pos))
+        else:
+            self.app.undo_stack.push(
+                em.extract_pages_cmd(self.app.model, uids, at_index=target[1]))
+        self.rebuild()
+        self.grid.reselect(uids)
+        self.app.after_model_change()
+
+    @staticmethod
+    def _drop_position(entry, uids, visual) -> int:
+        """Visuel indsaetningsplads -> plads EFTER at de trukne sider er taget ud.
+
+        Drop-maalet regnes i den liste brugeren SER, hvor de trukne sider stadig
+        er med. ``move_pages`` indsaetter derimod i listen efter at de er
+        fjernet. Traekker man fremad inde i samme fil, skal pladsen derfor
+        reduceres med antallet af trukne sider der laa foer den."""
+        want = set(uids)
+        before = sum(1 for pg in entry.pages[:visual] if pg.uid in want)
+        return max(0, visual - before)
+
+    # ------------------------------------------------- annotationslinjen
+    def _build_anno_toolbar(self, parent) -> QWidget:
+        """Vaerktoejslinje til annotation/maskering + zoom.
+
+        Grupperet med smaa overskrifter (Zoom · Vælg · Marker · Masker)
+        adskilt af separatorer. Rene ikonknapper med tooltip; kun det
+        valgte vaerktoejs ikon farves (accent, eller roedt for maskering).
         """
-        f = self.app.icon_factory
-        bar = ttk.Frame(parent)
-        bar.pack(side="top", fill="x", pady=(0, 4))
-        self._anno_bar = bar
-        self._zoom_var = tk.StringVar(value="100%")
-        self._tool_buttons: dict[str, ttk.Radiobutton] = {}
-        self._tool_icons: dict[str, str] = {}   # tool_id -> ikonnavn
+        bar = QWidget(parent)
+        lay = QHBoxLayout(bar)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(theme.SPACE["xs"])
 
-        def group(title):
-            """En gruppe: lille centreret overskrift over en raekke kontroller."""
-            g = ttk.Frame(bar)
-            g.pack(side="left", padx=(0, 2))
-            ttk.Label(g, text=title, font=theme.FONTS["caption"],
-                      foreground=theme.C["text_muted"], anchor="center"
-                      ).pack(side="top", fill="x")
-            row = ttk.Frame(g)
-            row.pack(side="top")
-            return row
+        def group(title: str) -> QHBoxLayout:
+            box = QWidget(bar)
+            bl = QVBoxLayout(box)
+            bl.setContentsMargins(0, 0, 0, 0)
+            bl.setSpacing(0)
+            cap = QLabel(title, box)
+            cap.setObjectName("Muted")
+            cap.setFont(theme.font("caption"))
+            cap.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+            bl.addWidget(cap)
+            row = QWidget(box)
+            rl = QHBoxLayout(row)
+            rl.setContentsMargins(0, 0, 0, 0)
+            rl.setSpacing(theme.SPACE["xxs"])
+            bl.addWidget(row)
+            lay.addWidget(box)
+            return rl
 
-        def sep():
-            ttk.Separator(bar, orient="vertical").pack(side="left", fill="y",
-                                                       padx=4, pady=(2, 0))
+        def sep() -> None:
+            line = theme.hairline("vertical", bar)
+            line.setFixedHeight(34)
+            lay.addSpacing(theme.SPACE["xs"])
+            lay.addWidget(line)
+            lay.addSpacing(theme.SPACE["xs"])
 
-        def tool_btn(row, tool, iconname, label):
+        def icon_btn(row, icon, tip, slot, color_key=None) -> QToolButton:
+            # Farven gemmes som TOKENNAVN, ikke som vaerdi: efter et temaskift
+            # skal ikonet gentegnes i den NYE tone af samme token.
+            btn = QToolButton(bar)
+            btn.setObjectName("ToolIcon")
+            size = theme.ICON["tool"]
+            color = theme.C[color_key] if color_key else None
+            btn.setIcon(icons_vector.qicon(icon, size, color))
+            btn.setIconSize(QSize(size, size))
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn.clicked.connect(slot)
+            Tooltip.attach(btn, tip)
+            row.addWidget(btn)
+            # Ikonet er tegnet i en tokenfarve og skal gentegnes ved temaskift.
+            self._plain_icons.append((btn, icon, size, color_key))
+            return btn
+
+        def tool_btn(row, tool, iconname, label) -> None:
             self._tool_icons[tool] = iconname
-            btn = ttk.Radiobutton(
-                row, value=tool, variable=self._tool_var,
-                style="Compact.Toolbutton", command=self._on_tool_change,
-                image=f.tool(iconname, self._tool_color(tool, False)))
-            btn.pack(side="left", padx=1)
+            btn = QToolButton(bar)
+            btn.setObjectName("ToolIcon")
+            btn.setCheckable(True)
+            size = theme.ICON["tool"]
+            btn.setIcon(icons_vector.qicon(iconname, size, self._tool_color(tool, False)))
+            btn.setIconSize(QSize(size, size))
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn.clicked.connect(lambda _c=False, t=tool: self._set_tool(t))
+            Tooltip.attach(btn, label)
+            row.addWidget(btn)
             self._tool_buttons[tool] = btn
-            Tooltip.attach(btn, _(label))
 
         # --- Zoom (som i en PDF-fremviser) ---
         zr = group(_("Zoom"))
-        icons_vector.icon_button(
-            zr, icon="zoom_out", tip=_("Zoom ud"), command=self._zoom_out,
-            factory=f, size=theme.ICON["tool"], style="Compact.Toolbutton"
-            ).pack(side="left", padx=(0, 1))
-        ze = ttk.Entry(zr, textvariable=self._zoom_var, width=6, justify="center")
-        ze.pack(side="left")
-        ze.bind("<Return>", lambda e: self._apply_zoom_entry())
-        ze.bind("<FocusOut>", lambda e: self._apply_zoom_entry())
-        icons_vector.icon_button(
-            zr, icon="zoom_in", tip=_("Zoom ind"), command=self._zoom_in,
-            factory=f, size=theme.ICON["tool"], style="Compact.Toolbutton"
-            ).pack(side="left", padx=(1, 0))
+        icon_btn(zr, "zoom_out", _("Zoom ud"), lambda: self.pcanvas.zoom_out())
+        self._zoom_entry = QLineEdit("100%", bar)
+        self._zoom_entry.setFixedWidth(58)
+        self._zoom_entry.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._zoom_entry.editingFinished.connect(self._apply_zoom_entry)
+        zr.addWidget(self._zoom_entry)
+        icon_btn(zr, "zoom_in", _("Zoom ind"), lambda: self.pcanvas.zoom_in())
         sep()
 
         # --- Vælg (navigation/markering) ---
         vr = group(_("Vælg"))
-        tool_btn(vr, "hand", "tool_hand", "Flyt")
-        tool_btn(vr, "select", "tool_select", "Marker")
+        tool_btn(vr, "hand", "tool_hand", _("Flyt"))
+        tool_btn(vr, "select", "tool_select", _("Marker"))
         sep()
 
-        # --- Marker (tegnevaerktoejer) + farve. Farven hoerer til her, saa det er
-        #     tydeligt at den gaelder tegningerne (og den valgte figur). ---
+        # --- Marker (farve + tegne- og tekstvaerktoejer). Farven staar
+        #     forrest: den gaelder alt i gruppen (og den valgte figur). ---
         mr = group(_("Marker"))
-        tool_btn(mr, "rect", "tool_rect", "Boks")
-        tool_btn(mr, "circle", "tool_circle", "Cirkel")
-        tool_btn(mr, "line", "tool_line", "Streg")
-        tool_btn(mr, "ink", "tool_ink", "Frihånd")
-        tool_btn(mr, "freetext", "tool_freetext", "Tekst")
-        self._color_btn = ttk.Button(
-            mr, style="Compact.Toolbutton", command=self._pick_color,
-            image=f.swatch_button(self._anno_color_hex(), theme.ICON["tool"]))
-        self._color_btn.pack(side="left", padx=(4, 1))
+        self._color_btn = QToolButton(bar)
+        self._color_btn.setObjectName("ToolIcon")
+        self._color_btn.setIcon(icons_vector.swatch_qicon(self._anno_color_hex(),
+                                                          theme.ICON["tool"]))
+        self._color_btn.setIconSize(QSize(theme.ICON["tool"], theme.ICON["tool"]))
+        self._color_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._color_btn.clicked.connect(self._pick_color)
         Tooltip.attach(self._color_btn, _("Vælg farve"))
-        sep()
-
-        # --- Fremhæv (tekstmarkering) ---
-        hr = group(_("Fremhæv"))
-        tool_btn(hr, "highlight", "tool_highlight", "Fremhæv")
-        tool_btn(hr, "underline", "tool_underline", "Understreg")
-        tool_btn(hr, "strikeout", "tool_strike", "Gennemstreg")
+        mr.addWidget(self._color_btn)
+        mr.addSpacing(theme.SPACE["xs"])
+        tool_btn(mr, "rect", "tool_rect", _("Boks"))
+        tool_btn(mr, "circle", "tool_circle", _("Cirkel"))
+        tool_btn(mr, "line", "tool_line", _("Streg"))
+        tool_btn(mr, "ink", "tool_ink", _("Frihånd"))
+        tool_btn(mr, "freetext", "tool_freetext", _("Tekst"))
+        tool_btn(mr, "highlight", "tool_highlight", _("Fremhæv"))
+        tool_btn(mr, "underline", "tool_underline", _("Understreg"))
+        tool_btn(mr, "strikeout", "tool_strike", _("Gennemstreg"))
         sep()
 
         # --- Masker (redaction) + soegning ---
         kr = group(_("Masker"))
-        tool_btn(kr, "redact", "tool_redact", "Masker boks")
-        tool_btn(kr, "redact_text", "tool_redact_text", "Masker ord")
-        se = ttk.Entry(kr, textvariable=self._search_var, width=14)
-        se.pack(side="left", padx=(4, 2))
-        se.bind("<Return>", lambda e: self._run_search_redaction())
-        icons_vector.icon_button(
-            kr, icon="search_redact", tip=_("Søg og masker"),
-            command=self._run_search_redaction, factory=f,
-            size=theme.ICON["tool"], color=theme.C["danger"],
-            style="Compact.Toolbutton").pack(side="left", padx=2)
-        self._search_status = ttk.Label(kr, text="",
-                                        foreground=theme.C["text_muted"])
-        self._search_status.pack(side="left", padx=4)
+        tool_btn(kr, "redact", "tool_redact", _("Masker boks"))
+        tool_btn(kr, "redact_text", "tool_redact_text", _("Masker ord"))
+        self._search_entry = QLineEdit(bar)
+        self._search_entry.setFixedWidth(150)
+        self._search_entry.setPlaceholderText(_("Søg…"))
+        self._search_entry.returnPressed.connect(self._run_search_redaction)
+        kr.addWidget(self._search_entry)
+        icon_btn(kr, "search_redact", _("Søg og masker"), self._run_search_redaction,
+                 color_key="danger")
+        self._search_status = QLabel("", bar)
+        self._search_status.setObjectName("Muted")
+        kr.addWidget(self._search_status)
 
-        self._refresh_tool_icons()
+        lay.addStretch(1)
+        return bar
 
-    def _tool_color(self, tool: str, selected: bool) -> str:
+    @staticmethod
+    def _tool_color(tool: str, selected: bool) -> str:
         """Ikonfarve for et vaerktoej. Maskeringsvaerktoejer er altid roede
         (destruktivt); oevrige er neutrale i hvile og accent naar valgt."""
         if tool in _REDACT_TOOLS:
             return theme.C["danger"]
         return theme.C["accent"] if selected else theme.C["text"]
 
-    def _refresh_tool_icons(self):
-        """Gentegn hvert vaerktoejs ikon i den rette farve (ttk nedtoner ikke
-        image= via style, saa den valgte-tilstand skal males eksplicit)."""
-        f = self.app.icon_factory
-        active = self._tool_var.get()
-        for tool, btn in self._tool_buttons.items():
-            try:
-                btn.configure(image=f.tool(self._tool_icons[tool],
-                                           self._tool_color(tool, tool == active)))
-            except tk.TclError:
-                pass
+    def _set_tool(self, tool: str) -> None:
+        self.active_tool = tool
+        size = theme.ICON["tool"]
+        for name, btn in self._tool_buttons.items():
+            btn.setChecked(name == tool)
+            btn.setIcon(icons_vector.qicon(self._tool_icons[name], size,
+                                           self._tool_color(name, name == tool)))
+        self.pcanvas.set_tool(tool)
+        self.app.set_crop_active(tool == "crop")
 
-    def _on_tool_change(self):
-        self.active_tool = self._tool_var.get()
-        self.pcanvas.set_tool(self.active_tool)
-        self._refresh_tool_icons()
+    def activate_crop_tool(self) -> None:
+        """Kommandobarens Beskær: slaa beskaerings-vaerktoejet til i fremviseren."""
+        if self.active_tool == "crop":
+            self._set_tool("hand")
+            return
+        self.active_tool = "crop"
+        for name, btn in self._tool_buttons.items():
+            btn.setChecked(False)
+        self.pcanvas.set_tool("crop")
+        self.app.set_crop_active(True)
+        self.app.set_status(_("Træk en ramme på siden for at beskære den"))
 
-    def _anno_color_hex(self):
+    def _anno_color_hex(self) -> str:
         return "#%02x%02x%02x" % tuple(int(round(c * 255)) for c in self._anno_color)
 
-    def _pick_color(self):
-        rgb, _hexv = colorchooser.askcolor(color=self._anno_color_hex(),
-                                           parent=self, title=_("Vælg farve"))
-        if rgb:
-            self._anno_color = tuple(c / 255.0 for c in rgb)
-            # Farven bruges til (a) NÆSTE nye tegning og (b) den aktuelt valgte
-            # annotation, hvis en er valgt -- så farveknappen "virker" både for
-            # kommende og allerede tegnede figurer.
-            self.pcanvas.set_color(self._anno_color)
-            self.pcanvas.recolor_selection(self._anno_color)
-            try:
-                self._color_btn.configure(image=self.app.icon_factory.swatch_button(
-                    self._anno_color_hex(), theme.ICON["tool"]))
-            except tk.TclError:
-                pass
-
-    def rotate_selected(self, delta):
-        """Kommandobarens roter-knapper.
-
-        Gaar gennem :meth:`rotate_pages`, IKKE gennem PageCanvas: den gamle vej
-        (``pcanvas.rotate_current``) genopbyggede kun den store fremviser, saa
-        miniaturen beholdt sit gamle billede -- og roterede oven i koebet den side
-        der laa oeverst i fremviseren frem for den markerede flise."""
-        uids = self.selected_uids()
-        if not uids:
+    def _pick_color(self) -> None:
+        col = QColorDialog.getColor(QColor(self._anno_color_hex()), self,
+                                    _("Vælg farve"))
+        if not col.isValid():
             return
-        self.rotate_pages(uids, delta)
+        self._anno_color = (col.redF(), col.greenF(), col.blueF())
+        # Farven bruges til (a) NAESTE nye tegning og (b) den aktuelt valgte
+        # annotation, hvis en er valgt -- saa farveknappen "virker" baade for
+        # kommende og allerede tegnede figurer.
+        self.pcanvas.set_color(self._anno_color)
+        self.pcanvas.recolor_selection(self._anno_color)
+        self._color_btn.setIcon(icons_vector.swatch_qicon(self._anno_color_hex(),
+                                                          theme.ICON["tool"]))
 
-    # --- zoom controls ----------------------------------------------------
-    def _on_zoom_change(self, pct):
-        try:
-            self._zoom_var.set("%d%%" % pct)
-        except tk.TclError:
-            pass
+    # ------------------------------------------------------------ zoom
+    def _on_zoom_change(self, pct: int) -> None:
+        self._zoom_entry.setText("%d%%" % pct)
 
-    def _zoom_in(self):
-        self.pcanvas.zoom_in()
+    def _apply_zoom_entry(self) -> None:
+        self.pcanvas.set_zoom_percent(self._zoom_entry.text().strip().rstrip("%").strip())
 
-    def _zoom_out(self):
-        self.pcanvas.zoom_out()
+    # ------------------------------------------------- søg og masker
+    def search_and_redact(self, text: str) -> None:
+        """Kør en soege-maskering paa ``text`` (fremviserens hoejreklik-menu).
 
-    def _apply_zoom_entry(self):
-        val = self._zoom_var.get().strip().rstrip("%").strip()
-        self.pcanvas.set_zoom_percent(val)
+        Feltet ryddes bagefter: soegningen er udfoert, og en efterladt streng ser
+        ud som om der stadig er noget at soege efter."""
+        self._search_entry.setText(text)
+        self._run_search_redaction()
+        self._search_entry.clear()
 
-    # --- search redaction -------------------------------------------------
-    def _run_search_redaction(self):
-        """Soeg og masker paa tvaers af **alle** aabne filer.
+    # ------------------------------------------------- tekstgenkendelse (OCR)
+    def run_ocr(self) -> None:
+        """Kør tekstgenkendelse på de sider der ikke har et tekstlag.
 
-        Grupperingen sker efter ``page.src_path`` -- ikke ``entry.path`` -- fordi en
-        fils sideliste kan indeholde sider fra en anden PDF ("Indsaet side"). Hver
-        kildefil aabnes dermed praecis en gang, og kun de sider der faktisk ligger i
-        modellen scannes."""
-        query = self._search_var.get().strip()
-        if not query:
+        Kaldes fra **kommandobaren** (knappen ligger til venstre for Anonymiser);
+        derfor er den offentlig.
+
+        Fremviseren gør det **ikke** af sig selv. En stille OCR af "den side man
+        står på" tog sekunder uden at brugeren kunne se hvorfor markeringen
+        virkede ét sted og ikke et andet; her er det en handling man beder om, med
+        fremdrift og et resultat der kan aflæses.
+
+        Grupperingen sker efter ``page.src_path`` -- ikke ``entry.path`` -- fordi
+        en fils sideliste kan indeholde sider fra en anden PDF ("Indsæt side").
+        """
+        if not ocr_text.ocr_available():
+            qt_util.warn(self.app, _("Tekstgenkendelse"),
+                         _("Tekstgenkendelse er ikke tilgængelig i denne "
+                           "installation."))
             return
+
         jobs = {}
         for entry in self.app.model.files:
             for p in entry.pages:
-                if em.kind_for_path(p.src_path) != em.KIND_PDF:
-                    continue
-                _path, idxs = jobs.setdefault(os.path.normcase(p.src_path),
-                                              (p.src_path, set()))
-                idxs.add(p.src_index)
+                is_pdf = em.kind_for_path(p.src_path) == em.KIND_PDF
+                idx = p.src_index if is_pdf else 0
+                key = (os.path.normcase(p.src_path), idx)
+                job = jobs.get(key)
+                if job is None:
+                    # Brugerens egen rotation er det bedste gæt på hvilken vej en
+                    # scanning vender; orienteringsprøven starter dér.
+                    jobs[key] = {"path": p.src_path, "index": idx,
+                                 "is_pdf": is_pdf, "rotation": p.rotation,
+                                 "uids": [p.uid]}
+                else:
+                    job["uids"].append(p.uid)
+
         if not jobs:
-            self._set_search_status(_("Ingen forekomster"))
+            self.app.set_status(_("Tilføj først en eller flere filer."),
+                                transient_ms=5000, kind="warning")
             return
-        pw = self.app._get_all_passwords()
-        self._set_search_status(_("Søger…"))
-        work = [(path, sorted(idxs)) for path, idxs in jobs.values()]
-        threading.Thread(target=self._search_worker, args=(work, pw, query),
-                         daemon=True).start()
 
-    def _search_worker(self, jobs, pw, query):
+        total = len(jobs)
+        prog = qt_util.ProgressDialog(
+            self.app, _("Tekstgenkendelse"),
+            _("Læser teksten på de scannede sider…"), cancellable=True)
+        prog.set_fraction(0, total)
+        # Ikke "Initialiserer..." et sekund: sig med det samme hvad der sker.
+        prog.set_status(_("Gennemgår sider…"))
+        prog.show()
+        qt_util.run_in_thread(self._ocr_worker, list(jobs.values()),
+                              self.app._get_all_passwords(), prog, total,
+                              name="viewer-ocr")
+
+    def _ocr_worker(self, jobs, pw, prog, total) -> None:
+        by_uid = {}
+        scanned = 0
+        last = [0.0]
+
+        def say(done, job, ocring) -> None:
+            """Sig hvad der sker LIGE NU -- fil, side og om der OCR'es.
+
+            Uden det stod dialogen med "Initialiserer..." koerslen igennem, og
+            en OCR af et bundt tager minutter. Struber som anonymiseringen, saa
+            en fil med tekstlag ikke drukner UI'en i signaler.
+            """
+            now = time.monotonic()
+            if done and now - last[0] < 0.12:
+                return
+            last[0] = now
+            label = _("%(fil)s · side %(nr)d") % {
+                "fil": os.path.basename(job["path"]), "nr": job["index"] + 1}
+            head = (_("Læser teksten med tekstgenkendelse…") if ocring
+                    else _("Gennemgår sider…"))
+            self.app._queue.put((prog.set_status, (
+                "%s  ·  %s" % (head, _("Side %(nr)d af %(alle)d · %(navn)s")
+                               % {"nr": done + 1, "alle": total, "navn": label}),)))
+
+        for n, job in enumerate(jobs):
+            if prog.cancel_event is not None and prog.cancel_event.is_set():
+                break
+            try:
+                if job["is_pdf"]:
+                    say(n, job, False)
+                    native = pdf_renderer.page_words(job["path"], pw, job["index"])
+                    if sum(len(w[4].strip()) for w in native) >= ocr_text.MIN_NATIVE_CHARS:
+                        words = native          # tekstlag: OCR ville være spild
+                    else:
+                        # Den langsomme gren: sig det, og sig det ustrubet --
+                        # her gaar der sekunder foer naeste opdatering.
+                        last[0] = 0.0
+                        say(n, job, True)
+                        words = redaction.words_for_page(
+                            job["path"], pw, job["index"],
+                            rotation_hint=job["rotation"],
+                            cancel=prog.cancel_event)
+                        scanned += 1
+                else:
+                    last[0] = 0.0
+                    say(n, job, True)
+                    words = ocr_text.image_words_a_space(
+                        job["path"], rotation_hint=job["rotation"],
+                        cancel=prog.cancel_event)
+                    scanned += 1
+            except Exception as e:
+                logger.info("Tekstgenkendelse af %s side %s fejlede: %s",
+                            job["path"], job["index"], e)
+                words = []
+            if words:
+                for uid in job["uids"]:
+                    by_uid[uid] = words
+            self.app._queue.put((prog.set_fraction, (n + 1, total)))
+        self.app._queue.put((self._apply_ocr, (by_uid, scanned, prog)))
+
+    def _apply_ocr(self, by_uid, scanned, prog=None) -> None:
+        if prog is not None:
+            prog.finish()
+        self.pcanvas.apply_ocr_words(by_uid)
+        readable = sum(1 for words in by_uid.values() if words)
+        if not readable:
+            self.app.set_status(_("Der blev ikke fundet tekst at markere"),
+                                transient_ms=8000, kind="warning")
+            return
+        if not scanned:
+            self.app.set_status(
+                _("Ingen scannede sider — teksten kunne markeres i forvejen"),
+                transient_ms=8000)
+            return
+        self.app.set_status(
+            _("Tekstgenkendelse færdig — teksten kan nu markeres på %d sider")
+            % readable, transient_ms=8000, kind="success")
+
+    def _run_search_redaction(self) -> None:
+        """Soeg og masker paa tvaers af **alle** aabne filer.
+
+        Grupperingen sker efter ``page.src_path`` -- ikke ``entry.path`` -- fordi
+        en fils sideliste kan indeholde sider fra en anden PDF ("Indsaet side").
+        Hver kildefil aabnes dermed praecis én gang, og kun de sider der faktisk
+        ligger i modellen scannes.
+
+        Billedfiler er **med**: de blev tidligere sprunget over, saa en indsat
+        scanning i .jpg/.png aldrig kunne maskeres via soegning. De faar samme
+        OCR-behandling som scannede PDF-sider.
+        """
+        query = self._search_entry.text().strip()
+        if not query:
+            return
+
+        pdf_jobs = {}
+        image_jobs = {}
+        for entry in self.app.model.files:
+            for p in entry.pages:
+                key = os.path.normcase(p.src_path)
+                if em.kind_for_path(p.src_path) == em.KIND_PDF:
+                    _path, idxs, rots = pdf_jobs.setdefault(
+                        key, (p.src_path, set(), {}))
+                    idxs.add(p.src_index)
+                    # Brugerens egen rotation er det bedste gaet paa hvilken vej
+                    # en scannet side vender; orienteringsproeven starter dér.
+                    if p.rotation:
+                        rots[p.src_index] = p.rotation
+                else:
+                    image_jobs.setdefault(key, (p.src_path, p.rotation))
+
+        if not pdf_jobs and not image_jobs:
+            self._search_status.setText(_("Ingen forekomster"))
+            return
+
+        total = sum(len(idxs) for _p, idxs, _r in pdf_jobs.values()) + len(image_jobs)
+        self._search_status.setText(_("Søger…"))
+        # OCR-soegning kan tage minutter paa et scannet bundt, saa den tavse
+        # worker fra foer er erstattet af en afbrydelig fremdriftsdialog.
+        prog = qt_util.ProgressDialog(
+            self.app, _("Søg og masker"),
+            _("Søger efter \"%s\"…") % query, cancellable=True)
+        prog.set_fraction(0, total)
+        prog.show()
+        qt_util.run_in_thread(
+            self._search_worker,
+            [(path, sorted(idxs), rots) for path, idxs, rots in pdf_jobs.values()],
+            list(image_jobs.values()),
+            self.app._get_all_passwords(), query, prog, total,
+            name="search-redact")
+
+    def _search_worker(self, jobs, images, pw, query, prog, total) -> None:
         results = {}
-        for path, indices in jobs:
-            hits = redaction.scan_indices(path, pw, query, indices)
-            if hits:
-                results[os.path.normcase(path)] = hits
-        self.app._queue.put((self._apply_search_redaction, (query, results)))
+        done = [0]
 
-    def _apply_search_redaction(self, query, results):
+        def bump(_n=None) -> None:
+            done[0] += 1
+            self.app._queue.put((prog.set_fraction, (done[0], total)))
+
+        try:
+            for path, indices, rots in jobs:
+                if prog.cancel_event is not None and prog.cancel_event.is_set():
+                    break
+                hits = redaction.scan_indices(
+                    path, pw, query, indices, rotations=rots,
+                    on_page=lambda _n: bump(), cancel=prog.cancel_event)
+                if hits:
+                    results[os.path.normcase(path)] = hits
+            for path, rotation in images:
+                if prog.cancel_event is not None and prog.cancel_event.is_set():
+                    break
+                rects = redaction.scan_image(path, query, rotation_hint=rotation,
+                                             cancel=prog.cancel_event)
+                bump()
+                if rects:
+                    # Billeder har kun én "side"; index 0 holder formen ens.
+                    results[os.path.normcase(path)] = {0: rects}
+        except Exception as e:
+            logger.exception("Soegningen fejlede: %s", e)
+        self.app._queue.put((self._apply_search_redaction, (query, results, prog)))
+
+    def _apply_search_redaction(self, query, results, prog=None) -> None:
+        if prog is not None:
+            prog.finish()
         items = []
         if results:
             for entry in self.app.model.files:
                 for p in entry.pages:
-                    rects = results.get(os.path.normcase(p.src_path), {}).get(p.src_index)
+                    is_pdf = em.kind_for_path(p.src_path) == em.KIND_PDF
+                    idx = p.src_index if is_pdf else 0
+                    rects = results.get(os.path.normcase(p.src_path), {}).get(idx)
                     if not rects:
                         continue
-                    spec = em.AnnotationSpec(kind=an.ANNOT_REDACT, rects=tuple(rects),
-                                             color=(0, 0, 0), fill=(0, 0, 0),
-                                             source="search", label=query)
-                    items.append((p.uid, spec))
+                    items.append((p.uid, em.AnnotationSpec(
+                        kind=an.ANNOT_REDACT, rects=tuple(rects), color=(0, 0, 0),
+                        fill=(0, 0, 0), source="search", label=query)))
         if not items:
-            self._set_search_status(_("Ingen forekomster"))
+            self._search_status.setText(_("Ingen forekomster"))
             return
         self.app.undo_stack.push(em.add_annotations_batch_cmd(self.app.model, items))
-        self.pcanvas._draw_overlays()
+        self.pcanvas.redraw_overlays()
         total = sum(len(spec.rects) for _uid, spec in items)
-        self._set_search_status(_("%s forekomster markeret") % total)
-
-    def _set_search_status(self, text):
-        try:
-            self._search_status.configure(text=text)
-        except tk.TclError:
-            pass
+        self._search_status.setText(_("%s forekomster markeret") % total)

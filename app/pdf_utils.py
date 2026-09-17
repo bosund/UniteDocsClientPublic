@@ -84,6 +84,59 @@ def _safe_close(doc) -> None:
             pass
 
 
+def _a4_placement(size) -> tuple:
+    """``(x, y, w, h)`` for et billede af ``size`` centreret paa en A4-side.
+
+    Ligger for sig selv fordi **to** forbrugere skal regne nøjagtig ens:
+    :func:`_image_to_pdf_a4`, der bager rasteren, og :func:`image_a4_transform`,
+    der mapper annotationer ind i samme rektangel. Divergerer de to, lander
+    maskeringer ved siden af det de skal daekke.
+    """
+    page_w, page_h = A4_SIZE
+    img_w, img_h = size
+    aspect = img_h / float(img_w)
+    new_w = page_w - 20
+    new_h = new_w * aspect
+    if new_h > page_h - 20:
+        new_h = page_h - 20
+        new_w = new_h / aspect
+    return (page_w - new_w) / 2, (page_h - new_h) / 2, new_w, new_h
+
+
+def image_a4_transform(image_path: str, rotation: int = 0, crop_box=None):
+    """Mapning fra billedets A-space (PIL-pixels) til A4-punkter, eller None.
+
+    Billedsider har ingen ``/Rotate`` og ingen cropbox i det gemte dokument:
+    rotation og beskaering **bages ind i rasteren** af :func:`_image_to_pdf_a4`.
+    Annotationer er derimod gemt i uroterede PIL-pixels, saa de skal igennem
+    praecis samme kaede (crop -> rotation -> skalering -> centrering) for at
+    lande rigtigt paa den faerdige side.
+
+    Returnerer en :class:`~app.view_transform.ViewTransform`, som allerede kan
+    netop dén kaede — ingen ny rotationsmatematik skrives her.
+    """
+    try:
+        from PIL import Image
+
+        from .view_transform import ViewTransform
+
+        with Image.open(image_path) as im:
+            img_w, img_h = im.size
+        if crop_box:
+            x0, y0, x1, y1 = crop_box
+            cw, ch = max(1, int(x1) - int(x0)), max(1, int(y1) - int(y0))
+        else:
+            cw, ch = img_w, img_h
+        # Efter en 90/270-graders drejning bytter siderne plads.
+        rot_w, rot_h = (ch, cw) if rotation % 180 == 90 else (cw, ch)
+        x, y, new_w, _new_h = _a4_placement((rot_w, rot_h))
+        return ViewTransform(img_w, img_h, rotation % 360, new_w / float(rot_w),
+                             x, y, crop=crop_box)
+    except Exception as e:
+        logger.error("Kunne ikke udlede billedtransformen for %s: %s", image_path, e)
+        return None
+
+
 def _image_to_pdf_a4(image_path: str, rotation: int = 0, crop_box: "tuple[int, int, int, int] | None" = None) -> "io.BytesIO | None":
     """Læg et billede centreret på en A4-side og returnér siden som PDF i en BytesIO."""
     try:
@@ -98,14 +151,7 @@ def _image_to_pdf_a4(image_path: str, rotation: int = 0, crop_box: "tuple[int, i
             img = img.convert("RGB")
 
         page_w, page_h = A4_SIZE
-        img_w, img_h = img.size
-        aspect = img_h / float(img_w)
-        new_w = page_w - 20
-        new_h = new_w * aspect
-        if new_h > page_h - 20:
-            new_h = page_h - 20
-            new_w = new_h / aspect
-        x_centered, y_centered = (page_w - new_w) / 2, (page_h - new_h) / 2
+        x_centered, y_centered, new_w, new_h = _a4_placement(img.size)
 
         img_buffer = io.BytesIO()
         img.save(img_buffer, format="PNG")

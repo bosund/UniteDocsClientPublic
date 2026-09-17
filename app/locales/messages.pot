@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: PROJECT VERSION\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2026-08-24 02:15+0200\n"
+"POT-Creation-Date: 2026-08-25 00:48+0200\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: LANGUAGE <LL@li.org>\n"
@@ -16,6 +16,597 @@ msgstr ""
 "Content-Type: text/plain; charset=utf-8\n"
 "Content-Transfer-Encoding: 8bit\n"
 "Generated-By: Babel 2.18.0\n"
+
+#: app/anonymize.py:165 app/page_view.py:2119
+#, python-format
+msgid "%(fil)s · side %(nr)d"
+msgstr ""
+
+#: app/dialogs.py:66
+msgid "Opdatering tilgængelig"
+msgstr ""
+
+#: app/dialogs.py:71
+msgid "Der er en ny version af Unite Docs"
+msgstr ""
+
+#: app/dialogs.py:75
+#, python-format
+msgid "Version %s er klar. Du kører version %s."
+msgstr ""
+
+#: app/dialogs.py:81
+#, python-format
+msgid "Download: %s"
+msgstr ""
+
+#: app/dialogs.py:84
+msgid "Nyt i denne version:"
+msgstr ""
+
+#: app/dialogs.py:94
+msgid "Spring denne version over"
+msgstr ""
+
+#: app/dialogs.py:95
+msgid "Ikke nu"
+msgstr ""
+
+#: app/dialogs.py:96
+msgid "Opdater nu"
+msgstr ""
+
+#: app/dialogs.py:153 app/dialogs.py:269 app/dialogs.py:543 app/dialogs.py:727
+#: app/dialogs.py:1584
+msgid "Luk"
+msgstr ""
+
+#: app/dialogs.py:170 app/dialogs.py:197 app/dialogs.py:211 app/main_app.py:329
+#: app/main_app.py:734 app/main_app.py:746 app/welcome.py:156
+msgid "Indsæt side"
+msgstr ""
+
+#: app/dialogs.py:175
+msgid "Overskrift"
+msgstr ""
+
+#: app/dialogs.py:179 app/page_canvas.py:940 app/page_canvas.py:963
+msgid "Tekst"
+msgstr ""
+
+#: app/dialogs.py:185 app/dialogs.py:225 app/dialogs.py:310 app/dialogs.py:453
+#: app/dialogs.py:1048 app/dialogs.py:1123 app/dialogs.py:1499
+#: app/page_canvas.py:83 app/qt_util.py:251
+msgid "Annuller"
+msgstr ""
+
+#: app/dialogs.py:186
+msgid "Indsæt"
+msgstr ""
+
+#: app/dialogs.py:198
+msgid "Skriv en overskrift eller noget tekst først."
+msgstr ""
+
+#: app/dialogs.py:226
+msgid "Før"
+msgstr ""
+
+#: app/dialogs.py:227
+msgid "Efter"
+msgstr ""
+
+#: app/dialogs.py:265
+msgid "Klik for at åbne mappen"
+msgstr ""
+
+#: app/dialogs.py:265
+msgid "Klik for at åbne filen"
+msgstr ""
+
+#: app/dialogs.py:281
+msgid "Vælg format"
+msgstr ""
+
+#: app/dialogs.py:285
+msgid "Vælg outputformat:"
+msgstr ""
+
+#: app/dialogs.py:296
+msgid "Tekstformater bevarer ikke billeder og layout."
+msgstr ""
+
+#: app/dialogs.py:311 app/dialogs.py:367 app/dialogs.py:585
+#: app/page_canvas.py:84 app/qt_util.py:151 app/qt_util.py:157
+#: app/qt_util.py:163
+msgid "OK"
+msgstr ""
+
+#: app/dialogs.py:328 app/main_app.py:380
+msgid "Credits"
+msgstr ""
+
+#: app/dialogs.py:338
+msgid "Licens: AGPL-3.0"
+msgstr ""
+
+#: app/dialogs.py:343
+msgid "Vis kildekode"
+msgstr ""
+
+#: app/dialogs.py:345
+msgid "Anvendte biblioteker"
+msgstr ""
+
+#: app/dialogs.py:430
+msgid "Vælg metode"
+msgstr ""
+
+#: app/dialogs.py:434
+msgid "Vælg type af gætning:"
+msgstr ""
+
+#: app/dialogs.py:438
+msgid "Numerisk (korte koder)"
+msgstr ""
+
+#: app/dialogs.py:445
+msgid "Antal cifre:"
+msgstr ""
+
+#: app/dialogs.py:454 app/dialogs.py:1049
+msgid "Start"
+msgstr ""
+
+#: app/dialogs.py:463 app/dialogs.py:827 app/main_app.py:698
+#: app/main_app.py:1775 app/main_app.py:2064 app/main_app.py:2097
+msgid "Fejl"
+msgstr ""
+
+#: app/dialogs.py:463
+msgid "Vælg mindst én metode."
+msgstr ""
+
+#: app/dialogs.py:502
+msgid "Vent..."
+msgstr ""
+
+#: app/dialogs.py:513
+msgid "Stop"
+msgstr ""
+
+#: app/dialogs.py:569
+msgid "Adgangskoder"
+msgstr ""
+
+#: app/dialogs.py:575
+msgid "Bruges til at åbne krypterede PDF'er. Ét kodeord pr. linje."
+msgstr ""
+
+#: app/dialogs.py:583 app/main_app.py:1944
+msgid "Tjek kodeliste"
+msgstr ""
+
+#: app/dialogs.py:584 app/dialogs.py:657 app/main_app.py:1997
+msgid "Gæt kodeord"
+msgstr ""
+
+#: app/dialogs.py:628
+msgid "Kodeord påkrævet"
+msgstr ""
+
+#: app/dialogs.py:635
+#, python-format
+msgid "Filen \"%s\" er beskyttet med kodeord."
+msgstr ""
+
+#: app/dialogs.py:646
+msgid "Vis kodeord"
+msgstr ""
+
+#: app/dialogs.py:656
+msgid "Spring over"
+msgstr ""
+
+#: app/dialogs.py:658 app/page_view.py:1731
+msgid "Lås op"
+msgstr ""
+
+#: app/dialogs.py:683
+msgid "Forkert kodeord. Prøv igen."
+msgstr ""
+
+#: app/dialogs.py:705 app/main_app.py:356
+msgid "Indstillinger"
+msgstr ""
+
+#: app/dialogs.py:763
+msgid "Udseende"
+msgstr ""
+
+#: app/dialogs.py:768
+msgid "Følg systemet"
+msgstr ""
+
+#: app/dialogs.py:768
+msgid "Lys"
+msgstr ""
+
+#: app/dialogs.py:768
+msgid "Mørk"
+msgstr ""
+
+#: app/dialogs.py:776
+msgid "Tema:"
+msgstr ""
+
+#: app/dialogs.py:777
+msgid "Skiftet slår igennem med det samme."
+msgstr ""
+
+#: app/dialogs.py:787
+msgid "Kodeordsgætning"
+msgstr ""
+
+#: app/dialogs.py:792
+msgid "Maksimal længde at gætte:"
+msgstr ""
+
+#: app/dialogs.py:793
+msgid "Antal cifre i numeriske koder brute-force forsøger."
+msgstr ""
+
+#: app/dialogs.py:796
+msgid "Sprog"
+msgstr ""
+
+#: app/dialogs.py:803
+msgid "Sprog:"
+msgstr ""
+
+#: app/dialogs.py:804
+msgid "Sprogændringer træder i kraft, når du lukker vinduet."
+msgstr ""
+
+#: app/dialogs.py:816
+msgid "Windows-integration"
+msgstr ""
+
+#: app/dialogs.py:818
+msgid "Tilføj 'Flet med UniteDocs' til højreklik-menuen for PDF-filer"
+msgstr ""
+
+#: app/dialogs.py:834
+msgid "Opdateringer"
+msgstr ""
+
+#: app/dialogs.py:835
+msgid "Søg automatisk efter opdateringer (én gang om ugen)"
+msgstr ""
+
+#: app/dialogs.py:846
+msgid ""
+"Unite Docs kontakter www.uniteapps.dk og spørger altid, før noget hentes "
+"eller installeres."
+msgstr ""
+
+#: app/dialogs.py:849
+msgid "Søg efter opdateringer"
+msgstr ""
+
+#: app/dialogs.py:851
+msgid "Manuel kontrol:"
+msgstr ""
+
+#: app/dialogs.py:856
+#, python-format
+msgid "Nulstil oversprunget version (%s)"
+msgstr ""
+
+#: app/dialogs.py:861
+msgid "Oversprunget version er nulstillet."
+msgstr ""
+
+#: app/dialogs.py:867
+msgid "Vedligeholdelse"
+msgstr ""
+
+#: app/dialogs.py:868
+msgid "Slet gemte kodeord"
+msgstr ""
+
+#: app/dialogs.py:870
+msgid "Gemte kodeord:"
+msgstr ""
+
+#: app/dialogs.py:873 app/main_app.py:2052
+msgid "Log"
+msgstr ""
+
+#: app/dialogs.py:874
+msgid "Logfilen kan hjælpe med fejlfinding."
+msgstr ""
+
+#: app/dialogs.py:879
+msgid "Download log"
+msgstr ""
+
+#: app/dialogs.py:881
+msgid "Send log via e-mail"
+msgstr ""
+
+#: app/dialogs.py:937 app/main_app.py:345
+msgid "Historik"
+msgstr ""
+
+#: app/dialogs.py:949
+msgid "Udgangspunkt"
+msgstr ""
+
+#: app/dialogs.py:961
+msgid "Klik på et trin for at springe dertil."
+msgstr ""
+
+#: app/dialogs.py:985 app/pseudonymize.py:75 app/pseudonymize.py:76
+msgid "CPR-nummer"
+msgstr ""
+
+#: app/dialogs.py:986
+msgid "Muligt CPR-nummer"
+msgstr ""
+
+#: app/dialogs.py:987 app/pseudonymize.py:77
+msgid "CVR-nummer"
+msgstr ""
+
+#: app/dialogs.py:988 app/pseudonymize.py:78
+msgid "Telefonnummer"
+msgstr ""
+
+#: app/dialogs.py:989 app/pseudonymize.py:79
+msgid "Kontonummer"
+msgstr ""
+
+#: app/dialogs.py:990 app/pseudonymize.py:80
+msgid "Adresse"
+msgstr ""
+
+#: app/dialogs.py:991
+msgid "Postnummer og by"
+msgstr ""
+
+#: app/dialogs.py:992 app/pseudonymize.py:82
+msgid "Sagsnummer"
+msgstr ""
+
+#: app/dialogs.py:993
+msgid "Navn"
+msgstr ""
+
+#: app/dialogs.py:994 app/pseudonymize.py:84
+msgid "Sted"
+msgstr ""
+
+#: app/dialogs.py:995 app/pseudonymize.py:85
+msgid "Organisation"
+msgstr ""
+
+#: app/dialogs.py:996
+msgid "E-mailadresse"
+msgstr ""
+
+#: app/dialogs.py:997 app/pseudonymize.py:87
+msgid "IBAN"
+msgstr ""
+
+#: app/dialogs.py:998 app/pseudonymize.py:88
+msgid "Betalingskort"
+msgstr ""
+
+#: app/dialogs.py:1012 app/dialogs.py:1093 app/main_app.py:2155
+#: app/main_app.py:2158 app/main_app.py:2167 app/main_app.py:2182
+#: app/main_app.py:2193 app/main_app.py:2232 app/main_app.py:2234
+#: app/main_app.py:2254 app/main_app.py:2275 app/main_app.py:2315
+msgid "Automatisk anonymisering"
+msgstr ""
+
+#: app/dialogs.py:1016
+msgid "Hvad skal gennemgås?"
+msgstr ""
+
+#: app/dialogs.py:1028
+#, python-format
+msgid "Kun nye sider (%d)"
+msgstr ""
+
+#: app/dialogs.py:1029
+#, python-format
+msgid "Alle sider forfra (%d)"
+msgstr ""
+
+#: app/dialogs.py:1034
+msgid "Tidligere fravalg huskes og kan slås til igen i listen."
+msgstr ""
+
+#: app/dialogs.py:1039
+msgid "Læs også scannede sider (tekstgenkendelse)"
+msgstr ""
+
+#: app/dialogs.py:1043
+msgid "Scannede sider tager længere tid, men findes ellers slet ikke."
+msgstr ""
+
+#: app/dialogs.py:1102
+#, python-format
+msgid "%(valgt)d af %(alle)d forekomster maskeres"
+msgstr ""
+
+#: app/dialogs.py:1111
+msgid "Vælg alle"
+msgstr ""
+
+#: app/dialogs.py:1112
+msgid "Fravælg alle"
+msgstr ""
+
+#: app/dialogs.py:1124
+msgid "Masker de valgte"
+msgstr ""
+
+#: app/dialogs.py:1139
+#, python-format
+msgid "%(fund)d forekomster fordelt på %(grupper)d værdier"
+msgstr ""
+
+#: app/dialogs.py:1146
+msgid ""
+"Alt er valgt. Fjern fluebenet ved det der IKKE skal maskeres — fx "
+"advokatens eller dommerens navn."
+msgstr ""
+
+#: app/dialogs.py:1154 app/dialogs.py:1562
+#, python-format
+msgid ""
+"%d side(r) blev læst med tekstgenkendelse. Kontrollér resultatet — "
+"genkendelsen kan have overset tekst."
+msgstr ""
+
+#: app/dialogs.py:1160
+#, python-format
+msgid "%d side(r) er læst som engelsk tekst ud over dansk."
+msgstr ""
+
+#: app/dialogs.py:1167
+#, python-format
+msgid ""
+"%d side(r) ser engelske ud, men den engelske sprogmodel er ikke "
+"installeret. Numre og adresser er fundet, men engelske navne kan være "
+"overset."
+msgstr ""
+
+#: app/dialogs.py:1173 app/dialogs.py:1569
+#, python-format
+msgid "%d side(r) kunne ikke læses."
+msgstr ""
+
+#: app/dialogs.py:1177
+msgid "Gennemgangen blev afbrudt — listen er ikke komplet."
+msgstr ""
+
+#: app/dialogs.py:1181
+#, python-format
+msgid "Husket fra sidste gennemgang, forud-fravalgt: %s"
+msgstr ""
+
+#: app/dialogs.py:1196
+msgid "Filtrér:"
+msgstr ""
+
+#: app/dialogs.py:1198
+msgid "Skriv for at søge i værdier og tekst…"
+msgstr ""
+
+#: app/dialogs.py:1206
+msgid "Værdi"
+msgstr ""
+
+#: app/dialogs.py:1206 app/pseudonymize.py:475 app/pseudonymize.py:491
+#: app/pseudonymize.py:548
+msgid "Type"
+msgstr ""
+
+#: app/dialogs.py:1206
+msgid "Rolle"
+msgstr ""
+
+#: app/dialogs.py:1206
+msgid "Antal"
+msgstr ""
+
+#: app/dialogs.py:1207
+msgid "Eksempel"
+msgstr ""
+
+#: app/dialogs.py:1267
+msgid "Indlæser…"
+msgstr ""
+
+#: app/dialogs.py:1279
+msgid "blandet"
+msgstr ""
+
+#: app/dialogs.py:1446 app/dialogs.py:1533
+msgid "Kopiér til udklipsholder"
+msgstr ""
+
+#: app/dialogs.py:1451
+#, python-format
+msgid "Kopiér tekst fra %d side(r)"
+msgstr ""
+
+#: app/dialogs.py:1456
+msgid "Pseudonymisér personoplysninger først"
+msgstr ""
+
+#: app/dialogs.py:1464
+msgid ""
+"Skal teksten uploades til en AI-tjeneste, bør du gøre det. Navne, CPR-"
+"numre og adresser byttes ud med etiketter som «Person 1». Ombytningen kan"
+" ikke fortrydes, og den REDUCERER — den fjerner ikke — risikoen for at "
+"nogen kan genkendes."
+msgstr ""
+
+#: app/dialogs.py:1474
+msgid "Sprogmodellen er ikke installeret, så teksten kan kun kopieres som den er."
+msgstr ""
+
+#: app/dialogs.py:1480
+msgid "Gennemgå fundene før kopiering"
+msgstr ""
+
+#: app/dialogs.py:1488
+msgid "Så kan du fravælge fx din egen klients navn, inden teksten byttes om."
+msgstr ""
+
+#: app/dialogs.py:1494
+msgid "Sider uden tekstlag læses automatisk med tekstgenkendelse."
+msgstr ""
+
+#: app/dialogs.py:1500 app/page_canvas.py:983
+msgid "Kopiér"
+msgstr ""
+
+#: app/dialogs.py:1537
+msgid "Teksten er kopieret"
+msgstr ""
+
+#: app/dialogs.py:1542
+#, python-format
+msgid "%(tegn)s tegn fra %(sider)d side(r)."
+msgstr ""
+
+#: app/dialogs.py:1549
+#, python-format
+msgid "%d personoplysning(er) er byttet ud med pseudonymer."
+msgstr ""
+
+#: app/dialogs.py:1553
+msgid "Der blev ikke fundet nogen personoplysninger at bytte ud."
+msgstr ""
+
+#: app/dialogs.py:1556
+msgid "Teksten er IKKE pseudonymiseret."
+msgstr ""
+
+#: app/dialogs.py:1575
+msgid "Gem navneoversigt…"
+msgstr ""
+
+#: app/dialogs.py:1579
+msgid ""
+"Oversigten kobler pseudonym og original. Den må ikke uploades sammen med "
+"teksten."
+msgstr ""
 
 #: app/export_formats.py:83
 msgid "PDF"
@@ -33,7 +624,7 @@ msgstr ""
 msgid "Ren tekst (.txt)"
 msgstr ""
 
-#: app/export_formats.py:93 app/main_app.py:1614
+#: app/export_formats.py:93 app/main_app.py:1040
 msgid "PDF-filer"
 msgstr ""
 
@@ -74,132 +665,188 @@ msgid ""
 "scanning uden tekstlag."
 msgstr ""
 
-#: app/export_formats.py:634 app/save_pipeline.py:189
+#: app/export_formats.py:634 app/save_pipeline.py:208
 #, python-format
 msgid "[Filen %s kunne ikke åbnes.]"
 msgstr ""
 
-#: app/main_app.py:205
+#: app/main_app.py:270 app/main_app.py:1044
+msgid "Tilføj filer"
+msgstr ""
+
+#: app/main_app.py:272 app/main_app.py:1713 app/welcome.py:186
+msgid "Flet og gem"
+msgstr ""
+
+#: app/main_app.py:275
+msgid "Gem enkeltfiler"
+msgstr ""
+
+#: app/main_app.py:278 app/welcome.py:175
+msgid "Kopiér tekst"
+msgstr ""
+
+#: app/main_app.py:280
+msgid ""
+"Kopiér dokumentets tekst — med mulighed for at pseudonymisere "
+"personoplysninger først."
+msgstr ""
+
+#: app/main_app.py:285
+msgid "Venstre"
+msgstr ""
+
+#: app/main_app.py:287
+msgid "Højre"
+msgstr ""
+
+#: app/main_app.py:290 app/welcome.py:146
+msgid "Beskær"
+msgstr ""
+
+#: app/main_app.py:291
+msgid "Træk en ramme for at beskære den viste side"
+msgstr ""
+
+#: app/main_app.py:300 app/page_view.py:2065 app/page_view.py:2093
+#: app/welcome.py:161
+msgid "Tekstgenkendelse"
+msgstr ""
+
+#: app/main_app.py:301
+msgid "Kør tekstgenkendelse på scannede filer, så du kan markere tekst."
+msgstr ""
+
+#: app/main_app.py:303
+msgid "Anonymiser"
+msgstr ""
+
+#: app/main_app.py:314
+msgid "Flyt op"
+msgstr ""
+
+#: app/main_app.py:316
+msgid "Flyt ned"
+msgstr ""
+
+#: app/main_app.py:318
+msgid "Flyt øverst"
+msgstr ""
+
+#: app/main_app.py:320
+msgid "Flyt nederst"
+msgstr ""
+
+#: app/main_app.py:325 app/welcome.py:151
+msgid "Sorter"
+msgstr ""
+
+#: app/main_app.py:326
+msgid "Sortér filerne"
+msgstr ""
+
+#: app/main_app.py:330
+msgid "Indsæt en ny side med overskrift og tekst"
+msgstr ""
+
+#: app/main_app.py:331
+msgid "Slet"
+msgstr ""
+
+#: app/main_app.py:336
+msgid "Fortryd"
+msgstr ""
+
+#: app/main_app.py:338
+msgid "Gentag"
+msgstr ""
+
+#: app/main_app.py:352 app/welcome.py:191
+msgid "Kodeord"
+msgstr ""
+
+#: app/main_app.py:353
+#, python-format
+msgid "Kodeord (%d gemt)"
+msgstr ""
+
+#: app/main_app.py:491
 msgid "Søger allerede efter opdateringer…"
 msgstr ""
 
-#: app/main_app.py:226
+#: app/main_app.py:510
 msgid "Søger efter opdateringer…"
 msgstr ""
 
-#: app/main_app.py:253 app/main_app.py:259
+#: app/main_app.py:533 app/main_app.py:538
 msgid "Opdatering"
 msgstr ""
 
-#: app/main_app.py:254
+#: app/main_app.py:534
 #, python-format
 msgid ""
 "Kunne ikke kontakte serveren:\n"
 "%s"
 msgstr ""
 
-#: app/main_app.py:260
+#: app/main_app.py:539
 #, python-format
 msgid "Du kører allerede den nyeste version (%s)."
 msgstr ""
 
-#: app/main_app.py:272
+#: app/main_app.py:551
 #, python-format
 msgid "Version %s springes over."
 msgstr ""
 
-#: app/main_app.py:280
-msgid "Opdatering tilgængelig"
-msgstr ""
-
-#: app/main_app.py:289
-msgid "Der er en ny version af Unite Docs"
-msgstr ""
-
-#: app/main_app.py:292
-#, python-format
-msgid "Version %s er klar. Du kører version %s."
-msgstr ""
-
-#: app/main_app.py:296
-#, python-format
-msgid "Download: %s"
-msgstr ""
-
-#: app/main_app.py:301
-msgid "Nyt i denne version:"
-msgstr ""
-
-#: app/main_app.py:322
-msgid "Opdater nu"
-msgstr ""
-
-#: app/main_app.py:324
-msgid "Ikke nu"
-msgstr ""
-
-#: app/main_app.py:326
-msgid "Spring denne version over"
-msgstr ""
-
-#: app/main_app.py:341
+#: app/main_app.py:557
 msgid "Henter opdatering"
 msgstr ""
 
-#: app/main_app.py:342
+#: app/main_app.py:558
 #, python-format
 msgid "Henter Unite Docs %s…"
 msgstr ""
 
-#: app/main_app.py:366
-#, python-format
-msgid "Hentet %s af %s"
-msgstr ""
-
-#: app/main_app.py:369
-#, python-format
-msgid "Hentet %s"
-msgstr ""
-
-#: app/main_app.py:379
+#: app/main_app.py:583
 msgid "Opdatering hentet"
 msgstr ""
 
-#: app/main_app.py:380
+#: app/main_app.py:584
 msgid ""
 "Installationen kan kun køres fra en installeret udgave. Filen ligger her,"
 " og hentesiden er åbnet i browseren."
 msgstr ""
 
-#: app/main_app.py:386
+#: app/main_app.py:590
 msgid "Installerer opdatering"
 msgstr ""
 
-#: app/main_app.py:387
+#: app/main_app.py:591
 #, python-format
 msgid "Unite Docs lukker nu og åbner igen, når version %s er installeret."
 msgstr ""
 
-#: app/main_app.py:394
+#: app/main_app.py:598
 msgid "Installationen kunne ikke startes"
 msgstr ""
 
-#: app/main_app.py:395
+#: app/main_app.py:599
 #, python-format
 msgid ""
 "Filen blev hentet, men installeren kunne ikke startes:\n"
 "%s"
 msgstr ""
 
-#: app/main_app.py:405
+#: app/main_app.py:608
 msgid "Download afbrudt."
 msgstr ""
 
-#: app/main_app.py:409
+#: app/main_app.py:612
 msgid "Opdateringen kunne ikke hentes"
 msgstr ""
 
-#: app/main_app.py:410
+#: app/main_app.py:613
 #, python-format
 msgid ""
 "Du kan hente installeren manuelt fra hjemmesiden.\n"
@@ -207,329 +854,212 @@ msgid ""
 "%s"
 msgstr ""
 
-#: app/main_app.py:443 app/main_app.py:837 app/main_app.py:2229
-#: app/main_app.py:2336 app/main_app.py:2830
-msgid "Luk"
+#: app/main_app.py:691
+msgid "Cache"
 msgstr ""
 
-#: app/main_app.py:544 app/main_app.py:576 app/main_app.py:601
-#: app/main_app.py:636 app/main_app.py:648 app/main_app.py:1148
-msgid "Indsæt side"
+#: app/main_app.py:691
+msgid "Ingen kodeordscache fundet."
 msgstr ""
 
-#: app/main_app.py:551
-msgid "Overskrift"
+#: app/main_app.py:696
+msgid "Cache slettet"
 msgstr ""
 
-#: app/main_app.py:558 app/page_canvas.py:722 app/page_canvas.py:821
-msgid "Tekst"
+#: app/main_app.py:696
+msgid "Alle gemte kodeord er slettet."
 msgstr ""
 
-#: app/main_app.py:577
-msgid "Skriv en overskrift eller noget tekst først."
+#: app/main_app.py:698
+#, python-format
+msgid "Kunne ikke slette cache: %s"
 msgstr ""
 
-#: app/main_app.py:585
-msgid "Indsæt"
-msgstr ""
-
-#: app/main_app.py:586 app/main_app.py:621 app/main_app.py:741
-#: app/main_app.py:948 app/main_app.py:2319 app/page_canvas.py:1067
-msgid "Annuller"
-msgstr ""
-
-#: app/main_app.py:616
-msgid "Efter"
-msgstr ""
-
-#: app/main_app.py:619
-msgid "Før"
-msgstr ""
-
-#: app/main_app.py:636 app/main_app.py:648
+#: app/main_app.py:734 app/main_app.py:746
 msgid "Siden kunne ikke oprettes."
 msgstr ""
 
-#: app/main_app.py:641
+#: app/main_app.py:739
 msgid "Ny side"
 msgstr ""
 
-#: app/main_app.py:665
+#: app/main_app.py:759
 #, python-format
 msgid "Skal siden oprettes før eller efter side %s?"
 msgstr ""
 
-#: app/main_app.py:667
+#: app/main_app.py:761
 msgid "Skal siden oprettes før eller efter den markerede side?"
 msgstr ""
 
-#: app/main_app.py:683 app/main_app.py:712
+#: app/main_app.py:776 app/main_app.py:795
 msgid "Side indsat"
 msgstr ""
 
-#: app/main_app.py:721
-msgid "Initialiserer..."
-msgstr ""
-
-#: app/main_app.py:734
-#, python-format
-msgid "Forløbet: %s"
-msgstr ""
-
-#: app/main_app.py:745
-msgid "Annullerer…"
-msgstr ""
-
-#: app/main_app.py:803
-#, python-format
-msgid "Kunne ikke åbne %s"
-msgstr ""
-
-#: app/main_app.py:830
-msgid "Klik for at åbne mappen"
-msgstr ""
-
-#: app/main_app.py:830
-msgid "Klik for at åbne filen"
-msgstr ""
-
-#: app/main_app.py:909
-msgid "Vælg format"
-msgstr ""
-
-#: app/main_app.py:924
-msgid "Vælg outputformat:"
-msgstr ""
-
-#: app/main_app.py:932
-msgid "Tekstformater bevarer ikke billeder og layout."
-msgstr ""
-
-#: app/main_app.py:947 app/main_app.py:1014 app/main_app.py:2420
-#: app/page_canvas.py:1066
-msgid "OK"
-msgstr ""
-
-#: app/main_app.py:963 app/main_app.py:1239
-msgid "Credits"
-msgstr ""
-
-#: app/main_app.py:980
-msgid "Licens: AGPL-3.0"
-msgstr ""
-
-#: app/main_app.py:984
-msgid "Vis kildekode"
-msgstr ""
-
-#: app/main_app.py:990
-msgid "Anvendte biblioteker"
-msgstr ""
-
-#: app/main_app.py:1022
-#, python-format
-msgid "Konverterer til %s..."
-msgstr ""
-
-#: app/main_app.py:1028
-msgid "Gør scannede sider søgbare (OCR)..."
-msgstr ""
-
-#: app/main_app.py:1034
-#, python-format
-msgid "Behandler fil %s af %s..."
-msgstr ""
-
-#: app/main_app.py:1049
-#, python-format
-msgid "ca. %s tilbage"
-msgstr ""
-
-#: app/main_app.py:1051
-#, python-format
-msgid "Konverterer side %(d)s af %(t)s"
-msgstr ""
-
-#: app/main_app.py:1069 app/main_app.py:1073 app/main_app.py:1598
-msgid "Annulleret"
-msgstr ""
-
-#: app/main_app.py:1069 app/main_app.py:1073 app/main_app.py:1598
-msgid "Eksporten blev annulleret."
-msgstr ""
-
-#: app/main_app.py:1111
-msgid "Tilføj filer"
-msgstr ""
-
-#: app/main_app.py:1112
-msgid "Flet og gem"
-msgstr ""
-
-#: app/main_app.py:1113
-msgid "Gem enkeltfiler"
-msgstr ""
-
-#: app/main_app.py:1117
-msgid "Venstre"
-msgstr ""
-
-#: app/main_app.py:1118
-msgid "Højre"
-msgstr ""
-
-#: app/main_app.py:1119
-msgid "Beskær"
-msgstr ""
-
-#: app/main_app.py:1125
-msgid "Træk en ramme for at beskære den viste side"
-msgstr ""
-
-#: app/main_app.py:1136
-msgid "Flyt op"
-msgstr ""
-
-#: app/main_app.py:1137
-msgid "Flyt ned"
-msgstr ""
-
-#: app/main_app.py:1138
-msgid "Flyt øverst"
-msgstr ""
-
-#: app/main_app.py:1139
-msgid "Flyt nederst"
-msgstr ""
-
-#: app/main_app.py:1141
-msgid "Sorter"
-msgstr ""
-
-#: app/main_app.py:1147
-msgid "Sortér filerne"
-msgstr ""
-
-#: app/main_app.py:1149
-msgid "Indsæt en ny side med overskrift og tekst"
-msgstr ""
-
-#: app/main_app.py:1150
-msgid "Slet"
-msgstr ""
-
-#: app/main_app.py:1156 app/main_app.py:1159
-msgid "Fortryd"
-msgstr ""
-
-#: app/main_app.py:1163 app/main_app.py:1166
-msgid "Gentag"
-msgstr ""
-
-#: app/main_app.py:1171
-msgid "Kodeord"
-msgstr ""
-
-#: app/main_app.py:1172
-#, python-format
-msgid "Kodeord (%d gemt)"
-msgstr ""
-
-#: app/main_app.py:1177 app/main_app.py:2651
-msgid "Indstillinger"
-msgstr ""
-
-#: app/main_app.py:1253
+#: app/main_app.py:805
 msgid "Ingen filer. Træk PDF'er hertil eller klik Tilføj filer."
 msgstr ""
 
-#: app/main_app.py:1262
+#: app/main_app.py:814
 #, python-format
 msgid "%(n)d filer · %(p)d sider"
 msgstr ""
 
-#: app/main_app.py:1268
+#: app/main_app.py:817
 #, python-format
 msgid "  ·  %(s)d valgt"
 msgstr ""
 
-#: app/main_app.py:1483
+#: app/main_app.py:991
+msgid "Der er ingen historik endnu."
+msgstr ""
+
+#: app/main_app.py:1010
+#, python-format
+msgid "%(n)d trin fortrudt"
+msgstr ""
+
+#: app/main_app.py:1011
+#, python-format
+msgid "%(n)d trin gentaget"
+msgstr ""
+
+#: app/main_app.py:1038
+msgid "Understøttede filer"
+msgstr ""
+
+#: app/main_app.py:1041
+msgid "Billedfiler"
+msgstr ""
+
+#: app/main_app.py:1079
+msgid "Slip for at tilføje filerne"
+msgstr ""
+
+#: app/main_app.py:1298
 msgid "Bekræft maskering"
 msgstr ""
 
-#: app/main_app.py:1484
+#: app/main_app.py:1299
 #, python-format
 msgid ""
 "Dokumentet indeholder %s maskering(er), som fjerner indhold permanent i "
 "den gemte fil og ikke kan fortrydes i outputtet. Vil du fortsætte?"
 msgstr ""
 
-#: app/main_app.py:1504 app/main_app.py:1583
+#: app/main_app.py:1320 app/main_app.py:1422 app/main_app.py:1505
+#: app/main_app.py:1517
 msgid "Eksport"
 msgstr ""
 
-#: app/main_app.py:1504
+#: app/main_app.py:1320
 msgid "Siden kan ikke eksporteres (låst fil)."
 msgstr ""
 
-#: app/main_app.py:1531
+#: app/main_app.py:1332 app/page_view.py:1716
+msgid "Eksportér side"
+msgstr ""
+
+#: app/main_app.py:1345 app/main_app.py:1453
 msgid "Eksporterer…"
 msgstr ""
 
-#: app/main_app.py:1531
+#: app/main_app.py:1345
 #, python-format
 msgid "Eksporterer side til %s…"
 msgstr ""
 
-#: app/main_app.py:1550 app/main_app.py:1566
+#: app/main_app.py:1369 app/main_app.py:1384
 msgid "Siden kunne ikke behandles."
 msgstr ""
 
-#: app/main_app.py:1583
+#: app/main_app.py:1423
 #, python-format
 msgid ""
-"Siden er eksporteret til:\n"
+"Nogle af siderne ligger i låste filer og kan ikke eksporteres:\n"
+"\n"
 "%s"
 msgstr ""
 
-#: app/main_app.py:1588
-msgid "Eksport fejlede"
+#: app/main_app.py:1431 app/main_app.py:1711
+msgid "Valgte sider"
 msgstr ""
 
-#: app/main_app.py:1614
-msgid "Understøttede filer"
+#: app/main_app.py:1434
+msgid "Vælg mappe til de eksporterede sider"
 msgstr ""
 
-#: app/main_app.py:1615
-msgid "Billedfiler"
+#: app/main_app.py:1441
+msgid "Eksportér sider"
 msgstr ""
 
-#: app/main_app.py:1661
-msgid "Slip for at tilføje filer"
-msgstr ""
-
-#: app/main_app.py:1673
-msgid "Slip for at tilføje filerne"
-msgstr ""
-
-#: app/main_app.py:1974 app/main_app.py:2054 app/main_app.py:2065
-#: app/main_app.py:2068
-msgid "Gem"
-msgstr ""
-
-#: app/main_app.py:1974
-msgid "Ingen PDF-filer at gemme."
-msgstr ""
-
-#: app/main_app.py:1983
-msgid "Vælg mappe til at gemme filer"
-msgstr ""
-
-#: app/main_app.py:2013 app/main_app.py:2108
+#: app/main_app.py:1446 app/main_app.py:1598 app/main_app.py:1721
 msgid "Filen er i brug"
 msgstr ""
 
-#: app/main_app.py:2014
+#: app/main_app.py:1447 app/main_app.py:1722
+#, python-format
+msgid ""
+"Filen \"%s\" er åben i et andet program.\n"
+"Luk den og prøv igen."
+msgstr ""
+
+#: app/main_app.py:1454
+#, python-format
+msgid "Eksporterer %(n)d sider til %(fmt)s…"
+msgstr ""
+
+#: app/main_app.py:1472
+msgid "Siderne kunne ikke behandles."
+msgstr ""
+
+#: app/main_app.py:1506
+msgid "Siderne er eksporteret til mappen:"
+msgstr ""
+
+#: app/main_app.py:1507
+msgid "Siderne er eksporteret som:"
+msgstr ""
+
+#: app/main_app.py:1517
+msgid "Siden er eksporteret som:"
+msgstr ""
+
+#: app/main_app.py:1522
+msgid "Eksport fejlede"
+msgstr ""
+
+#: app/main_app.py:1527 app/main_app.py:1653 app/main_app.py:1770
+#: app/main_app.py:2405
+msgid "Annulleret"
+msgstr ""
+
+#: app/main_app.py:1527 app/main_app.py:1653 app/main_app.py:1770
+msgid "Eksporten blev annulleret."
+msgstr ""
+
+#: app/main_app.py:1561 app/main_app.py:1662 app/main_app.py:1673
+#: app/main_app.py:1675
+msgid "Gem"
+msgstr ""
+
+#: app/main_app.py:1561
+msgid "Ingen PDF-filer at gemme."
+msgstr ""
+
+#: app/main_app.py:1570
+msgid "Vælg mappe til at gemme filer"
+msgstr ""
+
+#: app/main_app.py:1579 app/main_app.py:1727 app/main_app.py:2353
+msgid "Ingen sider"
+msgstr ""
+
+#: app/main_app.py:1579
+msgid "Der er ingen sider at gemme."
+msgstr ""
+
+#: app/main_app.py:1599
 #, python-format
 msgid ""
 "Følgende fil(er) er åben i et andet program:\n"
@@ -539,512 +1069,795 @@ msgid ""
 "Luk dem og prøv igen."
 msgstr ""
 
-#: app/main_app.py:2016
+#: app/main_app.py:1604
 msgid "Gemmer filer"
 msgstr ""
 
-#: app/main_app.py:2016
+#: app/main_app.py:1605
 #, python-format
 msgid "Forbereder at gemme %s filer..."
 msgstr ""
 
-#: app/main_app.py:2017
+#: app/main_app.py:1607
 msgid "Gemmer…"
 msgstr ""
 
-#: app/main_app.py:2050
+#: app/main_app.py:1620
+msgid "Gør scannede sider søgbare (OCR)..."
+msgstr ""
+
+#: app/main_app.py:1622
+#, python-format
+msgid "Konverterer til %s..."
+msgstr ""
+
+#: app/main_app.py:1630
+#, python-format
+msgid "Behandler fil %s af %s..."
+msgstr ""
+
+#: app/main_app.py:1659
 #, python-format
 msgid "%(ok)d gemt · %(fail)d fejlede"
 msgstr ""
 
-#: app/main_app.py:2055
+#: app/main_app.py:1663
 #, python-format
 msgid ""
 "%(ok)s filer gemt, %(fail)s fejlede.\n"
 "Se loggen for detaljer."
 msgstr ""
 
-#: app/main_app.py:2058
+#: app/main_app.py:1666
 #, python-format
 msgid "%(n)d filer gemt"
 msgstr ""
 
-#: app/main_app.py:2060
+#: app/main_app.py:1668
 #, python-format
 msgid "%s filer gemt."
 msgstr ""
 
-#: app/main_app.py:2062 app/main_app.py:2156
+#: app/main_app.py:1670 app/main_app.py:1762
 #, python-format
 msgid "%s side(r) uden tekstlag blev ikke udtrukket"
 msgstr ""
 
-#: app/main_app.py:2064
+#: app/main_app.py:1672
 msgid "Filerne ligger i:"
 msgstr ""
 
-#: app/main_app.py:2088
+#: app/main_app.py:1699 app/main_app.py:2347
 msgid "Ingen filer"
 msgstr ""
 
-#: app/main_app.py:2088
+#: app/main_app.py:1699 app/main_app.py:2347
 msgid "Tilføj filer først"
 msgstr ""
 
-#: app/main_app.py:2109
-#, python-format
-msgid ""
-"Filen \"%s\" er åben i et andet program.\n"
-"Luk den og prøv igen."
+#: app/main_app.py:1711
+msgid "Flettet"
 msgstr ""
 
-#: app/main_app.py:2116
+#: app/main_app.py:1727
+msgid "Der er ingen sider at flette."
+msgstr ""
+
+#: app/main_app.py:1730
 msgid "Fletter PDF'er"
 msgstr ""
 
-#: app/main_app.py:2116
+#: app/main_app.py:1731
 #, python-format
 msgid "Forbereder at flette %s filer..."
 msgstr ""
 
-#: app/main_app.py:2117
+#: app/main_app.py:1733
 msgid "Fletter…"
 msgstr ""
 
-#: app/main_app.py:2151
+#: app/main_app.py:1757
 #, python-format
 msgid "Gemt: %(name)s"
 msgstr ""
 
-#: app/main_app.py:2153
+#: app/main_app.py:1759
 #, python-format
 msgid ""
 "%(ok)s filer behandlet korrekt\n"
 "%(fail)s filer fejlede"
 msgstr ""
 
-#: app/main_app.py:2157
+#: app/main_app.py:1763
 msgid "Filen er gemt som:"
 msgstr ""
 
-#: app/main_app.py:2158
+#: app/main_app.py:1764
 msgid "Fletning fuldført"
 msgstr ""
 
-#: app/main_app.py:2163
+#: app/main_app.py:1774
 msgid "Fletning fejlede"
 msgstr ""
 
-#: app/main_app.py:2164 app/main_app.py:2311 app/main_app.py:2733
-#: app/main_app.py:2868 app/main_app.py:2914 app/main_app.py:2971
-msgid "Fejl"
-msgstr ""
-
-#: app/main_app.py:2164
+#: app/main_app.py:1775
 #, python-format
 msgid ""
 "Kunne ikke gemme filen:\n"
 "%s"
 msgstr ""
 
-#: app/main_app.py:2208
-msgid "Vent..."
+#: app/main_app.py:1791
+#, python-format
+msgid "Kunne ikke åbne %s"
 msgstr ""
 
-#: app/main_app.py:2211
-msgid "Stop"
-msgstr ""
-
-#: app/main_app.py:2220 app/main_app.py:2416
-msgid "Tjek kodeliste"
-msgstr ""
-
-#: app/main_app.py:2220 app/main_app.py:2326
+#: app/main_app.py:1945 app/main_app.py:1998
 msgid "Der er ingen krypterede PDF-filer på listen."
 msgstr ""
 
-#: app/main_app.py:2223
+#: app/main_app.py:1947
 msgid "Tjekker kodeord fra liste"
 msgstr ""
 
-#: app/main_app.py:2258 app/main_app.py:2639
+#: app/main_app.py:1980
 #, python-format
 msgid "Fundet: %s"
 msgstr ""
 
-#: app/main_app.py:2262 app/main_app.py:2643
+#: app/main_app.py:1983
 msgid "Ikke fundet"
 msgstr ""
 
-#: app/main_app.py:2271
-msgid "Vælg metode"
-msgstr ""
-
-#: app/main_app.py:2282
-msgid "Vælg type af gætning:"
-msgstr ""
-
-#: app/main_app.py:2290
-msgid "Numerisk (korte koder)"
-msgstr ""
-
-#: app/main_app.py:2296
-msgid "Antal cifre:"
-msgstr ""
-
-#: app/main_app.py:2311
-msgid "Vælg mindst én metode."
-msgstr ""
-
-#: app/main_app.py:2318
-msgid "Start"
-msgstr ""
-
-#: app/main_app.py:2326 app/main_app.py:2418 app/main_app.py:2551
-msgid "Gæt kodeord"
-msgstr ""
-
-#: app/main_app.py:2330
+#: app/main_app.py:2000
 msgid "Gæt / Tjek kodeord"
 msgstr ""
 
-#: app/main_app.py:2385
-msgid "Adgangskoder"
-msgstr ""
-
-#: app/main_app.py:2390
-msgid "Bruges til at åbne krypterede PDF'er. Ét kodeord pr. linje."
-msgstr ""
-
-#: app/main_app.py:2501
-msgid "Kodeord påkrævet"
-msgstr ""
-
-#: app/main_app.py:2506
-#, python-format
-msgid "Filen \"%s\" er beskyttet med kodeord."
-msgstr ""
-
-#: app/main_app.py:2517
-msgid "Vis kodeord"
-msgstr ""
-
-#: app/main_app.py:2533
-msgid "Forkert kodeord. Prøv igen."
-msgstr ""
-
-#: app/main_app.py:2549 app/page_view.py:173
-msgid "Lås op"
-msgstr ""
-
-#: app/main_app.py:2553
-msgid "Spring over"
-msgstr ""
-
-#: app/main_app.py:2624
+#: app/main_app.py:2023
 #, python-format
 msgid "Numerisk (max %s)..."
 msgstr ""
 
-#: app/main_app.py:2695
-msgid "Kodeordsgætning"
-msgstr ""
-
-#: app/main_app.py:2698
-msgid "Maksimal længde at gætte:"
-msgstr ""
-
-#: app/main_app.py:2700
-msgid "Antal cifre i numeriske koder brute-force forsøger."
-msgstr ""
-
-#: app/main_app.py:2703
-msgid "Sprog"
-msgstr ""
-
-#: app/main_app.py:2709
-msgid "Sprog:"
-msgstr ""
-
-#: app/main_app.py:2710
-msgid "Sprogændringer træder i kraft, når du lukker vinduet."
-msgstr ""
-
-#: app/main_app.py:2723
-msgid "Windows-integration"
-msgstr ""
-
-#: app/main_app.py:2737
-msgid "Tilføj 'Flet med UniteDocs' til højreklik-menuen for PDF-filer"
-msgstr ""
-
-#: app/main_app.py:2741
-msgid "Opdateringer"
-msgstr ""
-
-#: app/main_app.py:2753
-msgid "Søg automatisk efter opdateringer (én gang om ugen)"
-msgstr ""
-
-#: app/main_app.py:2755
-msgid ""
-"Unite Docs kontakter www.uniteapps.dk og spørger altid, før noget hentes "
-"eller installeres."
-msgstr ""
-
-#: app/main_app.py:2757
-msgid "Manuel kontrol:"
-msgstr ""
-
-#: app/main_app.py:2758
-msgid "Søg efter opdateringer"
-msgstr ""
-
-#: app/main_app.py:2767
-#, python-format
-msgid "Nulstil oversprunget version (%s)"
-msgstr ""
-
-#: app/main_app.py:2773
-msgid "Oversprunget version er nulstillet."
-msgstr ""
-
-#: app/main_app.py:2781
-msgid "Vedligeholdelse"
-msgstr ""
-
-#: app/main_app.py:2782
-msgid "Gemte kodeord:"
-msgstr ""
-
-#: app/main_app.py:2783
-msgid "Slet gemte kodeord"
-msgstr ""
-
-#: app/main_app.py:2787 app/main_app.py:2851
-msgid "Log"
-msgstr ""
-
-#: app/main_app.py:2788
-msgid "Logfilen kan hjælpe med fejlfinding."
-msgstr ""
-
-#: app/main_app.py:2796
-msgid "Download log"
-msgstr ""
-
-#: app/main_app.py:2799
-msgid "Send log via e-mail"
-msgstr ""
-
-#: app/main_app.py:2851
+#: app/main_app.py:2052
 msgid "Der er ingen logfil endnu."
 msgstr ""
 
-#: app/main_app.py:2856
+#: app/main_app.py:2055
 msgid "Gem logfil"
 msgstr ""
 
-#: app/main_app.py:2859
+#: app/main_app.py:2056
 msgid "Logfiler"
 msgstr ""
 
-#: app/main_app.py:2859
+#: app/main_app.py:2057
 msgid "Alle filer"
 msgstr ""
 
-#: app/main_app.py:2868
+#: app/main_app.py:2065
 #, python-format
 msgid "Kunne ikke gemme logfilen: %s"
 msgstr ""
 
-#: app/main_app.py:2887
+#: app/main_app.py:2076
 msgid "(ingen logfil endnu)"
 msgstr ""
 
-#: app/main_app.py:2900
+#: app/main_app.py:2088
 #, python-format
 msgid "UniteDocs log - version %s"
 msgstr ""
 
-#: app/main_app.py:2902
+#: app/main_app.py:2089
 msgid "Beskriv venligst problemet her:"
 msgstr ""
 
-#: app/main_app.py:2904
+#: app/main_app.py:2090
 msgid "--- Seneste log ---"
 msgstr ""
 
-#: app/main_app.py:2914
+#: app/main_app.py:2098
 #, python-format
 msgid "Kunne ikke åbne e-mailprogrammet: %s"
 msgstr ""
 
-#: app/main_app.py:2969
-msgid "Cache slettet"
+#: app/main_app.py:2139
+msgid "Find og masker CPR-numre, navne og adresser automatisk"
 msgstr ""
 
-#: app/main_app.py:2969
-msgid "Alle gemte kodeord er slettet."
+#: app/main_app.py:2159 app/page_view.py:2087
+msgid "Tilføj først en eller flere filer."
 msgstr ""
 
-#: app/main_app.py:2971
+#: app/main_app.py:2168
+msgid "Der er ingen sider at gennemgå."
+msgstr ""
+
+#: app/main_app.py:2183
+msgid "Der er ingen nye sider at gennemgå."
+msgstr ""
+
+#: app/main_app.py:2194
+msgid "Forbereder gennemgang…"
+msgstr ""
+
+#: app/main_app.py:2205
+msgid "Indlæser sprogmodel…"
+msgstr ""
+
+#: app/main_app.py:2226 app/page_view.py:2124
 #, python-format
-msgid "Kunne ikke slette cache: %s"
+msgid "Side %(nr)d af %(alle)d · %(navn)s"
 msgstr ""
 
-#: app/main_app.py:2973
-msgid "Cache"
+#: app/main_app.py:2235
+#, python-format
+msgid "Gennemgangen fejlede: %s"
 msgstr ""
 
-#: app/main_app.py:2973
-msgid "Ingen kodeordscache fundet."
+#: app/main_app.py:2246
+msgid "Gennemgangen blev afbrudt"
 msgstr ""
 
-#: app/page_canvas.py:343 app/page_view.py:251
-msgid "Ingen sider at vise. Tilføj filer."
+#: app/main_app.py:2250
+msgid "Der blev ikke fundet personoplysninger."
 msgstr ""
 
-#: app/page_canvas.py:722 app/page_canvas.py:821
-msgid "Skriv tekst:"
+#: app/main_app.py:2263
+msgid "Anonymiseringen blev annulleret"
 msgstr ""
 
-#: app/page_canvas.py:736
+#: app/main_app.py:2270
+msgid "Ingen nye maskeringer at tilføje"
+msgstr ""
+
+#: app/main_app.py:2278
+#, python-format
+msgid "%d maskeringer tilføjet"
+msgstr ""
+
+#: app/main_app.py:2306
+#, python-format
+msgid ""
+"\"%s\" er tilføjet efter at dokumentet blev anonymiseret. Skal den også "
+"gennemgås?"
+msgstr ""
+
+#: app/main_app.py:2309
+#, python-format
+msgid ""
+"%d filer er tilføjet efter at dokumentet blev anonymiseret. Skal de også "
+"gennemgås?"
+msgstr ""
+
+#: app/main_app.py:2316
+msgid "Anonymisér"
+msgstr ""
+
+#: app/main_app.py:2317
+msgid "Ikke denne fil"
+msgstr ""
+
+#: app/main_app.py:2318
+msgid "Ikke disse filer"
+msgstr ""
+
+#: app/main_app.py:2319
+msgid "Ikke flere filer"
+msgstr ""
+
+#: app/main_app.py:2353
+msgid "Der er ingen sider at kopiere."
+msgstr ""
+
+#: app/main_app.py:2364
+msgid "Kopierer tekst"
+msgstr ""
+
+#: app/main_app.py:2365
+#, python-format
+msgid "Læser %d side(r)…"
+msgstr ""
+
+#: app/main_app.py:2367
+msgid "Læser tekst…"
+msgstr ""
+
+#: app/main_app.py:2389
+#, python-format
+msgid "Læser %s…"
+msgstr ""
+
+#: app/main_app.py:2395
+msgid "Pseudonymisering"
+msgstr ""
+
+#: app/main_app.py:2396
+#, python-format
+msgid ""
+"Sprogmodellen mangler, så teksten kan ikke pseudonymiseres.\n"
+"\n"
+"%s"
+msgstr ""
+
+#: app/main_app.py:2399
+msgid "Kopiering fejlede"
+msgstr ""
+
+#: app/main_app.py:2405
+msgid "Kopieringen blev annulleret."
+msgstr ""
+
+#: app/main_app.py:2408
+msgid "Ingen tekst"
+msgstr ""
+
+#: app/main_app.py:2409
+msgid "Der blev ikke fundet tekst på de valgte sider."
+msgstr ""
+
+#: app/main_app.py:2418
+msgid ""
+"Alt er valgt. Fjern fluebenet ved det der IKKE skal byttes ud med et "
+"pseudonym."
+msgstr ""
+
+#: app/main_app.py:2420
+msgid "Kopiér med pseudonymer"
+msgstr ""
+
+#: app/main_app.py:2421
+#, python-format
+msgid "%(valgt)d af %(alle)d forekomster byttes ud"
+msgstr ""
+
+#: app/main_app.py:2437
+msgid "Teksten er kopieret til udklipsholderen."
+msgstr ""
+
+#: app/main_app.py:2449 app/main_app.py:2477
+msgid "Navneoversigt"
+msgstr ""
+
+#: app/main_app.py:2450
+msgid "Der er ingen pseudonymer at gemme."
+msgstr ""
+
+#: app/main_app.py:2453 app/main_app.py:2459 app/main_app.py:2475
+msgid "Gem navneoversigt"
+msgstr ""
+
+#: app/main_app.py:2453
+msgid "Hvilket format?"
+msgstr ""
+
+#: app/main_app.py:2454
+msgid "Markdown"
+msgstr ""
+
+#: app/main_app.py:2454
+msgid "Tekstfil"
+msgstr ""
+
+#: app/main_app.py:2459
+msgid "Pseudonymer"
+msgstr ""
+
+#: app/main_app.py:2477
+msgid "Oversigten er gemt som:"
+msgstr ""
+
+#: app/page_canvas.py:195
 msgid "Tekst kopieret"
 msgstr ""
 
-#: app/page_canvas.py:774
-msgid "Kopiér"
+#: app/page_canvas.py:451
+msgid "Siden har ingen tekst at markere — kør Tekstgenkendelse først"
 msgstr ""
 
-#: app/page_canvas.py:776
+#: app/page_canvas.py:543 app/page_view.py:305
+msgid "Ingen sider at vise. Tilføj filer."
+msgstr ""
+
+#: app/page_canvas.py:940 app/page_canvas.py:963
+msgid "Skriv tekst:"
+msgstr ""
+
+#: app/page_canvas.py:985
 msgid "Fremhæv markering"
 msgstr ""
 
-#: app/page_canvas.py:778
+#: app/page_canvas.py:987
 msgid "Understreg markering"
 msgstr ""
 
-#: app/page_canvas.py:780
+#: app/page_canvas.py:989
 msgid "Gennemstreg markering"
 msgstr ""
 
-#: app/page_canvas.py:782
+#: app/page_canvas.py:991
 msgid "Masker markering"
 msgstr ""
 
-#: app/page_canvas.py:785
+#: app/page_canvas.py:994
 #, python-format
 msgid "Masker alle forekomster af \"%s\""
 msgstr ""
 
-#: app/page_view.py:160
-msgid "Roter venstre"
-msgstr ""
-
-#: app/page_view.py:161
-msgid "Roter højre"
-msgstr ""
-
-#: app/page_view.py:167
-msgid "Eksportér side"
-msgstr ""
-
-#: app/page_view.py:169
-msgid "Slet side"
-msgstr ""
-
-#: app/page_view.py:175
-msgid "Vælg alle sider i filen"
-msgstr ""
-
-#: app/page_view.py:178
-msgid "Slet fil"
-msgstr ""
-
-#: app/page_view.py:424
+#: app/page_view.py:334
 #, python-format
 msgid "%(day)02d/%(month)02d-%(year)04d"
 msgstr ""
 
-#: app/page_view.py:596
+#: app/page_view.py:464
 msgid "Låst"
 msgstr ""
 
-#: app/page_view.py:777
-#, python-format
-msgid "Fil valgt: %s"
-msgstr ""
-
-#: app/page_view.py:781
-#, python-format
-msgid "%(s)d sider valgt"
-msgstr ""
-
-#: app/page_view.py:784 app/page_view.py:804
-#, python-format
-msgid "Side %(i)d af %(n)d"
-msgstr ""
-
-#: app/page_view.py:1140
+#: app/page_view.py:996
 msgid "Slip for at gøre siden til sin egen fil"
 msgstr ""
 
-#: app/page_view.py:1206
+#: app/page_view.py:1220
+msgid "Læser…"
+msgstr ""
+
+#: app/page_view.py:1224
 #, python-format
 msgid "%(n)d sider"
 msgstr ""
 
-#: app/page_view.py:1280
-msgid "Træk en ramme på siden for at beskære den"
+#: app/page_view.py:1224
+msgid "1 side"
 msgstr ""
 
-#: app/page_view.py:1325
+#: app/page_view.py:1466
+msgid "Vis eller skjul fillisten"
+msgstr ""
+
+#: app/page_view.py:1484
+msgid "Vælg flere sider med flueben. Slås også til af Ctrl-klik."
+msgstr ""
+
+#: app/page_view.py:1504
+#, python-format
+msgid "Miniaturestørrelse: %d %%"
+msgstr ""
+
+#: app/page_view.py:1681
+#, python-format
+msgid "Fil valgt: %s"
+msgstr ""
+
+#: app/page_view.py:1685
+#, python-format
+msgid "%(s)d sider valgt"
+msgstr ""
+
+#: app/page_view.py:1688 app/page_view.py:1706
+#, python-format
+msgid "Side %(i)d af %(n)d"
+msgstr ""
+
+#: app/page_view.py:1712
+msgid "Roter venstre"
+msgstr ""
+
+#: app/page_view.py:1713
+msgid "Roter højre"
+msgstr ""
+
+#: app/page_view.py:1717
+#, python-format
+msgid "Eksportér %d sider"
+msgstr ""
+
+#: app/page_view.py:1722 app/page_view.py:1735
+msgid "Kopiér til udklipsholder…"
+msgstr ""
+
+#: app/page_view.py:1725
+msgid "Slet side"
+msgstr ""
+
+#: app/page_view.py:1733
+msgid "Vælg alle sider i filen"
+msgstr ""
+
+#: app/page_view.py:1739
+msgid "Slet fil"
+msgstr ""
+
+#: app/page_view.py:1926
 msgid "Zoom"
 msgstr ""
 
-#: app/page_view.py:1327
+#: app/page_view.py:1927
 msgid "Zoom ud"
 msgstr ""
 
-#: app/page_view.py:1335
+#: app/page_view.py:1933
 msgid "Zoom ind"
 msgstr ""
 
-#: app/page_view.py:1341
+#: app/page_view.py:1937
 msgid "Vælg"
 msgstr ""
 
-#: app/page_view.py:1348
+#: app/page_view.py:1944
 msgid "Marker"
 msgstr ""
 
-#: app/page_view.py:1358 app/page_view.py:1415
+#: app/page_view.py:1956 app/page_view.py:2020
 msgid "Vælg farve"
 msgstr ""
 
-#: app/page_view.py:1362
+#: app/page_view.py:1961
 msgid "Fremhæv"
 msgstr ""
 
-#: app/page_view.py:1369
+#: app/page_view.py:1968
 msgid "Masker"
 msgstr ""
 
-#: app/page_view.py:1376
+#: app/page_view.py:1973
+msgid "Søg…"
+msgstr ""
+
+#: app/page_view.py:1976 app/page_view.py:2222
 msgid "Søg og masker"
 msgstr ""
 
-#: app/page_view.py:1478 app/page_view.py:1507
+#: app/page_view.py:2013
+msgid "Træk en ramme på siden for at beskære den"
+msgstr ""
+
+#: app/page_view.py:2066
+msgid "Tekstgenkendelse er ikke tilgængelig i denne installation."
+msgstr ""
+
+#: app/page_view.py:2094
+msgid "Læser teksten på de scannede sider…"
+msgstr ""
+
+#: app/page_view.py:2097 app/page_view.py:2122
+msgid "Gennemgår sider…"
+msgstr ""
+
+#: app/page_view.py:2121
+msgid "Læser teksten med tekstgenkendelse…"
+msgstr ""
+
+#: app/page_view.py:2169
+msgid "Der blev ikke fundet tekst at markere"
+msgstr ""
+
+#: app/page_view.py:2174
+msgid "Ingen scannede sider — teksten kunne markeres i forvejen"
+msgstr ""
+
+#: app/page_view.py:2178
+#, python-format
+msgid "Tekstgenkendelse færdig — teksten kan nu markeres på %d sider"
+msgstr ""
+
+#: app/page_view.py:2214 app/page_view.py:2279
 msgid "Ingen forekomster"
 msgstr ""
 
-#: app/page_view.py:1481
+#: app/page_view.py:2218
 msgid "Søger…"
 msgstr ""
 
-#: app/page_view.py:1512
+#: app/page_view.py:2223
+#, python-format
+msgid "Søger efter \"%s\"…"
+msgstr ""
+
+#: app/page_view.py:2284
 #, python-format
 msgid "%s forekomster markeret"
+msgstr ""
+
+#: app/pii.py:360
+msgid "Den engelske sprogmodel er ikke installeret."
+msgstr ""
+
+#: app/pii.py:361
+msgid ""
+"Den danske sprogmodel er ikke installeret. Kør installationsprogrammet "
+"igen og vælg \"Dansk sprogmodel til automatisk anonymisering\"."
+msgstr ""
+
+#: app/pii.py:365
+msgid "Anonymiseringsmotoren mangler i denne installation."
+msgstr ""
+
+#: app/pseudonymize.py:69
+msgid "Oversigt over pseudonymier. Du må ikke uploade disse til AI."
+msgstr ""
+
+#: app/pseudonymize.py:81
+msgid "Postnr-by"
+msgstr ""
+
+#: app/pseudonymize.py:83
+msgid "Person"
+msgstr ""
+
+#: app/pseudonymize.py:86
+msgid "E-mail"
+msgstr ""
+
+#: app/pseudonymize.py:89
+msgid "Oplysning"
+msgstr ""
+
+#: app/pseudonymize.py:470 app/pseudonymize.py:484 app/pseudonymize.py:539
+#, python-format
+msgid "Oprettet: %s"
+msgstr ""
+
+#: app/pseudonymize.py:472 app/pseudonymize.py:486 app/pseudonymize.py:541
+#, python-format
+msgid "Kilder: %s"
+msgstr ""
+
+#: app/pseudonymize.py:475 app/pseudonymize.py:488 app/pseudonymize.py:490
+#: app/pseudonymize.py:548
+msgid "Pseudonym"
+msgstr ""
+
+#: app/pseudonymize.py:475 app/pseudonymize.py:489 app/pseudonymize.py:491
+#: app/pseudonymize.py:548
+msgid "Oprindelig værdi"
+msgstr ""
+
+#: app/pseudonymize.py:475
+msgid "Forekomster"
+msgstr ""
+
+#: app/pseudonymize.py:498 app/pseudonymize.py:546
+msgid "Der blev ikke fundet nogen personoplysninger."
+msgstr ""
+
+#: app/qt_util.py:195
+msgid "Ja"
+msgstr ""
+
+#: app/qt_util.py:196
+msgid "Nej"
+msgstr ""
+
+#: app/qt_util.py:236
+msgid "Initialiserer..."
+msgstr ""
+
+#: app/qt_util.py:264
+#, python-format
+msgid "Forløbet: %s"
+msgstr ""
+
+#: app/qt_util.py:282
+#, python-format
+msgid "Hentet %s af %s"
+msgstr ""
+
+#: app/qt_util.py:285
+#, python-format
+msgid "Hentet %s"
+msgstr ""
+
+#: app/qt_util.py:295
+#, python-format
+msgid "ca. %s tilbage"
+msgstr ""
+
+#: app/qt_util.py:296
+#, python-format
+msgid "Konverterer side %(d)s af %(t)s"
+msgstr ""
+
+#: app/qt_util.py:302
+msgid "Annullerer…"
+msgstr ""
+
+#: app/welcome.py:147
+msgid ""
+"Skær skæve scannerkanter og alt for brede margener væk med ét træk. "
+"Bilaget ser trykklart ud — uden en tur forbi kopimaskinen."
+msgstr ""
+
+#: app/welcome.py:152
+msgid ""
+"Sæt 40 bilag i rækkefølge efter navn eller dato med ét klik. Der ryger "
+"kvarteret, hvor du ellers trak filer på plads én ad gangen."
+msgstr ""
+
+#: app/welcome.py:157
+msgid ""
+"Læg en forside eller en skilleside ind præcis dér, hvor den skal være. "
+"Overskrift og tekst skriver du her — ingen omvej om Word."
+msgstr ""
+
+#: app/welcome.py:162
+msgid ""
+"En scanning er et billede — du kan hverken søge eller markere i den. Kør "
+"tekstgenkendelse én gang, så opfører siden sig som ethvert andet "
+"dokument: du kan søge, overstrege og maskere ord."
+msgstr ""
+
+#: app/welcome.py:169
+msgid "Masker og anonymiser"
+msgstr ""
+
+#: app/welcome.py:170
+msgid ""
+"Den sorte streg fjerner teksten under sig — den lægger sig ikke bare "
+"ovenpå. Anonymiser gennemgår selv hver eneste side for navne, CPR-numre "
+"og adresser, så du slipper for at nærlæse 200 sider før aktindsigten "
+"sendes."
+msgstr ""
+
+#: app/welcome.py:176
+msgid ""
+"Skal sagen forbi en AI? Kopiér teksten med navne, CPR-numre og adresser "
+"byttet ud med Person 1 og Advokat 2 — samme person får samme etiket i "
+"hele bundtet, så teksten stadig giver mening. Nøglen tilbage beholder du "
+"selv."
+msgstr ""
+
+#: app/welcome.py:181
+msgid "Fremhæv, tegn og marker"
+msgstr ""
+
+#: app/welcome.py:182
+msgid ""
+"Gul overstregning på det afgørende afsnit, en pil eller en note ved siden"
+" af. Modtageren ser pointen med det samme — også på den udskrevne udgave."
+msgstr ""
+
+#: app/welcome.py:187
+msgid ""
+"Saml hele sagen i én PDF til retten, eller gem hver fil for sig. "
+"Rækkefølgen bliver den, du ser på skærmen — der er ingen overraskelser i "
+"den færdige fil."
+msgstr ""
+
+#: app/welcome.py:192
+msgid ""
+"Åbn en låst PDF én gang, så husker programmet koden. Næste gang — og "
+"næste uge — åbner filen af sig selv."
+msgstr ""
+
+#: app/welcome.py:200
+msgid "Vejledninger og svar på det, der ellers koster et opkald til IT."
+msgstr ""
+
+#: app/welcome.py:203
+msgid "Slå en virksomhed op: CVR-nummer, adresse og ejerkreds på få sekunder."
+msgstr ""
+
+#: app/welcome.py:206
+msgid "Nyheder, opdateringer og de øvrige Unite-programmer."
+msgstr ""
+
+#: app/welcome.py:470
+msgid "Det kan du med Unite Docs"
+msgstr ""
+
+#: app/welcome.py:476
+msgid "Mere fra Unite Apps"
+msgstr ""
+
+#: app/welcome.py:502
+msgid "Unite Docs"
+msgstr ""
+
+#: app/welcome.py:506
+msgid "Saml sagen, ryd op og send den af sted — uden at printe en eneste side."
+msgstr ""
+
+#: app/welcome.py:532
+msgid "Træk dine PDF'er herind — eller klik for at finde dem"
 msgstr ""
 

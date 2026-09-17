@@ -43,6 +43,8 @@ import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 
+from . import utils
+
 logger = logging.getLogger(__name__)
 
 VERSION_URL = "https://www.uniteapps.dk/api/unitedocs/version"
@@ -382,10 +384,15 @@ def can_install() -> bool:
     Kun i en frossen build. Koerer appen fra kildekode, ville installeren
     skrive til en helt anden mappe end den, der er i gang - saa peger vi
     brugeren mod hjemmesiden i stedet.
+
+    Spoerg **altid** gennem :func:`utils.is_frozen`. Nuitka saetter ikke
+    ``sys.frozen``, saa et direkte ``getattr(sys, "frozen", False)`` er falsk
+    i den frosne build - og saa naegtede autoupdateren at installere netop
+    dér hvor den skulle.
     """
     if os.name != "nt":
         return False
-    return bool(getattr(sys, "frozen", False))
+    return utils.is_frozen()
 
 
 def _quote(path) -> str:

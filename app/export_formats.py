@@ -15,6 +15,9 @@ Vigtige designvalg:
   tilbage til en synlig placeholder (se ``_page_state``/``_build_chapter_body``).
 - Rotation nulstilles før tekstudtræk (se ``_extract_page_markdown``): en roteret
   side er en visningsindstilling, men flaget forvirrer layout-analysen.
+- Tabeller findes med strategien "lines" (se ``TABLE_STRATEGY``), og den
+  kolonneoverskrift pymupdf4llm sluger, sættes tilbage (se
+  ``_restore_table_headers``).
 - HTML-koder fra tabeludtræk (`<br>`) fjernes (se ``_clean_extracted_markdown``).
 - Billeder udelades bevidst (``EXPORT_INCLUDE_IMAGES``): ellers ville pymupdf4llm
   skrive hundredvis af sidecar-PNG'er eller oppuste .md-filer med base64.
@@ -168,6 +171,14 @@ def _cleared_work_doc(doc):
     return tmp, tmp
 
 
+# Tabelgenkendelse. pymupdf4llm's standard er "lines_strict", som kun godtager
+# celler tegnet med rigtige streger. Danske lønsedler, opgørelser og kontoudtog
+# tegner i stedet hver celle som et udfyldt rektangel (zebra-striber) uden en
+# eneste streg — med "lines_strict" blev de tabeller slet ikke fundet, og hver
+# række endte som en løs tekstlinje i .md-filen. "lines" tæller også
+# cellebaggrundene med og genkender netop de tabeller.
+TABLE_STRATEGY = "lines"
+
 _MD_KWARGS = dict(
     page_chunks=True,
     # Bemærk: use_ocr findes IKKE i pymupdf4llm 0.3.4. At sende den ville lande i
@@ -177,7 +188,100 @@ _MD_KWARGS = dict(
     embed_images=EXPORT_INCLUDE_IMAGES,
     ignore_images=not EXPORT_INCLUDE_IMAGES,
     show_progress=False,          # ville skrive til en konsol der ikke findes
+    table_strategy=TABLE_STRATEGY,
 )
+
+
+# Ord regnes for at stå på samme tekstlinje når underkanten er inden for denne
+# afstand — nok til at rumme flere skriftstørrelser i én overskriftslinje.
+_HEADER_BAND = 2.0
+
+
+def _md_row(cells) -> str:
+    return "|" + "|".join(cells) + "|"
+
+
+def _swallowed_header_words(page, table):
+    """Ordene i tekstlinjen lige over `table`, hvis pymupdf4llm har kasseret den.
+
+    pymupdf4llm dropper enhver tekstlinje der bare *rører* en tabels boks. Er
+    cellerne udfyldte rektangler, starter boksen typisk et par tiendedele inde i
+    overskriftslinjens underlængder — så forsvinder hele kolonneoverskriften
+    ("Lønartsnr. Beskrivelse … Beløb") ud af eksporten, og tabellens første
+    datarække bliver forfremmet til overskrift.
+
+    Vi leder kun efter ord der krydser tabellens overkant med tyngdepunktet over
+    den: præcis de ord pymupdf4llm har smidt væk. Ord der ligger helt over
+    tabellen er stadig med i teksten og må ikke gentages.
+    """
+    x0, y0, x1, _y1 = table.bbox
+    crossing = [
+        w for w in page.get_text("words")
+        if w[3] > y0 > (w[1] + w[3]) / 2 and w[2] > x0 and w[0] < x1
+    ]
+    if not crossing:
+        return []
+    bottom = max(w[3] for w in crossing)
+    return sorted((w for w in crossing if abs(w[3] - bottom) <= _HEADER_BAND),
+                  key=lambda w: w[0])
+
+
+def _header_cells_from_words(words, cells) -> list:
+    """Fordel ordene på tabellens kolonner efter deres vandrette midtpunkt."""
+    out = [""] * len(cells)
+    for w in words:
+        mid = (w[0] + w[2]) / 2
+        for i, cell in enumerate(cells):
+            if cell is not None and cell[0] <= mid < cell[2]:
+                out[i] = (out[i] + " " + w[4]).strip()
+                break
+    return out if any(out) else []
+
+
+def _restore_table_headers(page, text: str) -> str:
+    """Giv tabellerne deres rigtige kolonneoverskrifter tilbage.
+
+    Uden det her viser den eksporterede tabel dokumentets første datarække som
+    overskrift ("1000 | Gage | …") og resten under "Col4"/"Col5" — mens den
+    række der faktisk navngiver kolonnerne er væk. Se
+    ``_swallowed_header_words`` for hvorfor den forsvinder.
+    """
+    if not text or "|---|" not in text:
+        return text
+    try:
+        tables = page.find_tables(strategy=TABLE_STRATEGY).tables
+    except Exception as e:
+        logger.debug("kunne ikke genfinde tabeller til overskriftsreparation: %s", e)
+        return text
+
+    lines = text.split("\n")
+    repaired = set()
+    for table in tables:
+        header = getattr(table, "header", None)
+        if header is None or header.external or not table.rows:
+            continue        # overskriften er allerede med i outputtet
+        words = _swallowed_header_words(page, table)
+        if not words:
+            continue
+        names = _header_cells_from_words(words, table.rows[0].cells)
+        if not names:
+            continue
+        # Sådan skrev pymupdf tabellens overskriftsrække: tomme celler blev til
+        # "Col1", "Col2" … Vi genkender linjen på den og skubber den ned som data.
+        promoted = _md_row([(n or "Col%d" % (i + 1)).replace("\n", "<br>")
+                            for i, n in enumerate(header.names)])
+        demoted = _md_row([(n or "").replace("\n", "<br>") for n in header.names])
+        new_header = _md_row(names)
+        if new_header == promoted:
+            continue
+        sep = _md_row(["---"] * table.col_count)
+        for i, line in enumerate(lines[:-1]):
+            if i in repaired or line != promoted or lines[i + 1] != sep:
+                continue
+            lines[i:i + 2] = [new_header, sep, demoted]
+            repaired.update(range(i, i + 3))
+            break
+    return "\n".join(lines)
 
 
 def _extract_page_markdown(work, progress=None, cancel=None) -> list[str]:
@@ -191,16 +295,24 @@ def _extract_page_markdown(work, progress=None, cancel=None) -> list[str]:
     n = work.page_count
     if progress is None and cancel is None:
         chunks = pymupdf4llm.to_markdown(work, **_MD_KWARGS)
-        return [_clean_extracted_markdown(c.get("text", "")) for c in chunks]
+        return [_page_markdown(work, i, c) for i, c in enumerate(chunks)]
     out = []
     for i in range(n):
         if cancel is not None and cancel():
             raise ExportCancelled()
         chunks = pymupdf4llm.to_markdown(work, pages=[i], **_MD_KWARGS)
-        out.append(_clean_extracted_markdown(chunks[0].get("text", "")) if chunks else "")
+        out.append(_page_markdown(work, i, chunks[0]) if chunks else "")
         if progress is not None:
             progress(i + 1, n)
     return out
+
+
+def _page_markdown(work, page_index: int, chunk) -> str:
+    """Én sides rå pymupdf4llm-output gjort klar til eksport."""
+    text = chunk.get("text", "")
+    if page_index < work.page_count:
+        text = _restore_table_headers(work[page_index], text)
+    return _clean_extracted_markdown(text)
 
 
 # ---------------------------------------------------------------------------
