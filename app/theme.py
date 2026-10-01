@@ -147,8 +147,9 @@ def font(name: str = "base") -> QFont:
 
 
 # Ikonstoerrelser (logiske px). cmdlg = store kommandobar-ikoner (ikon over
-# tekst), cmd = kompakt kommandobar, tool = vaerktoejslinje.
-ICON = {"cmdlg": 24, "cmd": 20, "tool": 18, "small": 16, "tiny": 14}
+# tekst), cmd = kompakt kommandobar, tool = vaerktoejslinje, bar = knapperne
+# nederst til venstre under sidegitteret (small + 40 %).
+ICON = {"cmdlg": 24, "cmd": 20, "tool": 18, "bar": 22, "small": 16, "tiny": 14}
 
 TOOLTIP_DELAY_MS = 450
 
@@ -264,22 +265,6 @@ QToolButton#ToolIcon:checked { background: %(accent_subtle)s; border-color: %(ac
 
 QFrame#Hairline { background: %(border)s; border: none; }
 
-QListWidget#FileList {
-    background: %(bg)s;
-    border: none;
-    border-right: 1px solid %(border)s;
-    outline: none;
-}
-QListWidget#FileList::item {
-    /* Ingen padding her: hoejden kommer fra delegatens sizeHint, og QSS-padding
-       laegges oveni uden at sizeHint ved det -- teksten blev klippet. */
-    padding: 0px;
-    border-radius: 4px;
-    margin: 1px 4px;
-    color: %(text)s;
-}
-QListWidget#FileList::item:hover    { background: %(hover)s; }
-QListWidget#FileList::item:selected { background: %(accent_subtle)s; color: %(text)s; }
 QWidget#CommandBar, QWidget#StatusBar { background: %(bg_chrome)s; }
 QLabel#Muted   { color: %(text_muted)s; }
 QLabel#Danger  { color: %(danger)s; }

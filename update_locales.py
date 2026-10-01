@@ -25,6 +25,8 @@ def extract_messages():
         'pybabel', 'extract', 
         '-F', 'babel.cfg',
         '-k', '_',
+        # Undo-etiketter: gemmes uoversat og oversaettes ved visning (undo_stack.N_).
+        '-k', 'N_',
         '-o', 'app/locales/messages.pot',
         'app/'
     ], capture_output=True, text=True)

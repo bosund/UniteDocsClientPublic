@@ -24,16 +24,15 @@ import time
 from pathlib import Path
 
 from PIL import Image
-from PySide6.QtCore import (QMimeData, QPoint, QPointF, QRect, QRectF, QSize, Qt,
+from PySide6.QtCore import (QItemSelectionModel, QMimeData, QPoint, QPointF, QRect, QRectF, QSize, Qt,
                             QTimer, Signal)
 from PySide6.QtGui import (QColor, QDrag, QFontMetrics, QKeySequence, QPainter,
                            QPen, QPixmap, QPolygonF)
 from PySide6.QtWidgets import (QAbstractItemView, QAbstractScrollArea,
-                               QColorDialog, QFrame, QHBoxLayout, QLabel,
-                               QLineEdit, QListWidget, QListWidgetItem, QMenu,
-                               QApplication, QSizePolicy, QSlider, QSplitter, QStyle,
-                               QStyleOptionViewItem, QStyledItemDelegate,
-                               QToolButton, QVBoxLayout, QWidget)
+                               QColorDialog, QFrame, QHBoxLayout, QHeaderView,
+                               QLabel, QLineEdit, QMenu, QSizePolicy,
+                               QSlider, QSplitter, QStackedWidget, QToolButton,
+                               QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget)
 
 from . import annotations as an
 from . import edit_model as em
@@ -353,6 +352,11 @@ class ThumbnailGrid(QAbstractScrollArea):
             p.drawRect(r.adjusted(1, 1, -1, -1))
 
         x = r.left() + theme.SPACE["sm"]
+        if self._has_file_check(entry):
+            box = self._header_check_rect(r)
+            state = self._file_check_state(entry)
+            self._paint_check(p, box, state == 2, partial=state == 1)
+            x = box.right() + 1 + theme.SPACE["sm"]
         lock = self._lock_icon_for(entry)
         if lock is not None:
             name, color = lock
@@ -366,26 +370,41 @@ class ThumbnailGrid(QAbstractScrollArea):
         fm = QFontMetrics(theme.font("strong"))
         avail = max(40, r.right() - x - theme.SPACE["md"])
         name = Path(entry.path).name
-        date = self._fmt_date(entry.creation_date)
+        # Har Power-sorteringen fundet en dato i filnavnet, er det den filerne
+        # er sorteret efter -- saa er det ogsaa den der skal staa her. Den
+        # staar i accentfarven, saa den ikke kan forveksles med en
+        # oprettelsesdato (filer uden fundet dato viser stadig den).
+        date = self._fmt_date(entry.name_date or entry.creation_date)
+        date_color = QColor(theme.C["accent" if entry.name_date else "text"])
         tail = ("   " + date) if date else ""
-        p.setPen(QColor(theme.C["text"]))
+        left = Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
+
+        def draw_line(top, height, text):
+            """``text`` i tekstfarven, efterfulgt af datoen i dens egen farve."""
+            p.setPen(QColor(theme.C["text"]))
+            p.drawText(QRect(x, top, avail, height), left, text)
+            if tail:
+                dx = fm.horizontalAdvance(text)
+                p.setPen(date_color)
+                p.drawText(QRect(x + dx, top, max(0, avail - dx), height), left, tail)
+
         if fm.horizontalAdvance(name + tail) <= avail:
-            p.drawText(QRect(x, r.top(), avail, r.height()),
-                       Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
-                       name + tail)
+            draw_line(r.top(), r.height(), name)
             return
         # To linjer: saa meget af navnet som der er plads til, resten forkortet.
         line_h = fm.height() + 2
         top = r.top() + (r.height() - 2 * line_h) // 2
         cut = self._fit_prefix(name, avail, fm)
         first, rest = name[:cut], name[cut:]
-        p.drawText(QRect(x, top, avail, line_h),
-                   Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, first)
+        p.setPen(QColor(theme.C["text"]))
+        p.drawText(QRect(x, top, avail, line_h), left, first)
         room = max(0, avail - fm.horizontalAdvance(tail))
-        second = (fm.elidedText(rest, Qt.TextElideMode.ElideRight, room) + tail
-                  if room else (date or ""))
-        p.drawText(QRect(x, top + line_h, avail, line_h),
-                   Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, second)
+        if room:
+            draw_line(top + line_h, line_h,
+                      fm.elidedText(rest, Qt.TextElideMode.ElideRight, room))
+        else:
+            p.setPen(date_color)
+            p.drawText(QRect(x, top + line_h, avail, line_h), left, date or "")
 
     @staticmethod
     def _fit_prefix(text: str, avail: int, fm: QFontMetrics) -> int:
@@ -433,15 +452,22 @@ class ThumbnailGrid(QAbstractScrollArea):
         if self.select_mode:
             self._paint_check(p, self._check_rect(r), selected)
 
-    def _paint_check(self, p: QPainter, box: QRect, on: bool) -> None:
+    def _paint_check(self, p: QPainter, box: QRect, on: bool, partial: bool = False) -> None:
         """Afkrydsningsfelt paa en flise. Males OVEN PAA miniaturen, saa det
-        ogsaa kan ses paa en side der er hvid i hjoernet."""
+        ogsaa kan ses paa en side der er hvid i hjoernet. ``partial`` er filhovedets
+        "nogle af siderne" -- en streg i stedet for et flueben."""
         p.save()
         p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-        p.setBrush(QColor(theme.C["accent"] if on else theme.C["paper"]))
-        p.setPen(QPen(QColor(theme.C["accent"] if on else theme.C["border"]), 1))
+        filled = on or partial
+        p.setBrush(QColor(theme.C["accent"] if filled else theme.C["paper"]))
+        p.setPen(QPen(QColor(theme.C["accent"] if filled else theme.C["border"]), 1))
         p.drawRoundedRect(box, 3, 3)
-        if on:
+        if partial and not on:
+            p.setPen(QPen(QColor(theme.C["selection_fg"]), 2,
+                          Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+            y = box.center().y()
+            p.drawLine(box.left() + box.width() // 4, y, box.right() - box.width() // 4, y)
+        elif on:
             p.setPen(QPen(QColor(theme.C["selection_fg"]), 2,
                           Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap,
                           Qt.PenJoinStyle.RoundJoin))
@@ -693,6 +719,41 @@ class ThumbnailGrid(QAbstractScrollArea):
         self.viewport().update()
         self.selection_changed.emit()
 
+    # -- filhovedets afkrydsningsfelt: "alle sider i filen" -------------
+    @staticmethod
+    def _has_file_check(entry) -> bool:
+        """Kun filer med FLERE sider -- paa en enkeltside-fil er flisens eget
+        flueben det samme."""
+        return entry.pages_loaded and len(entry.pages) > 1
+
+    def _header_check_rect(self, r: QRect) -> QRect:
+        return QRect(r.left() + theme.SPACE["sm"], r.top() + (r.height() - CHECK_BOX) // 2,
+                     CHECK_BOX, CHECK_BOX)
+
+    def _file_check_state(self, entry) -> int:
+        """0 = ingen sider markeret, 1 = nogle, 2 = alle."""
+        sel = set(self._selected)
+        n = sum(1 for p in entry.pages if p.uid in sel)
+        return 2 if n == len(entry.pages) else (1 if n else 0)
+
+    def toggle_file_pages(self, iid: str) -> None:
+        """Afkrydsningsfeltet i filhovedet. Er alle filens sider markeret, fravaelges
+        de; ellers laegges de ALLE til markeringen. Additivt, saa man kan krydse
+        flere filer af og flytte dem samlet -- derfor slaas "Vaelg sider" til."""
+        entry = self.app.model.entry_by_iid(iid)
+        if entry is None or not entry.pages:
+            return
+        mine = {p.uid for p in entry.pages}
+        sel = set(self._selected)
+        sel = sel - mine if self._file_check_state(entry) == 2 else sel | mine
+        self._selected = [u for u in self.page_order if u in sel]
+        self._anchor_uid = self._selected[0] if self._selected else None
+        self._selected_file = None
+        if self._selected:
+            self.set_select_mode(True)
+        self.viewport().update()
+        self.selection_changed.emit()
+
     def select_all_in_file(self, iid: str) -> None:
         """Marker alle sider i filen (praktisk foran roter/slet/traek)."""
         entry = self.app.model.entry_by_iid(iid)
@@ -704,6 +765,20 @@ class ThumbnailGrid(QAbstractScrollArea):
         self._selected_file = None
         if len(self._selected) > 1:
             self.set_select_mode(True)
+        self.viewport().update()
+        self.selection_changed.emit()
+
+    def select_files(self, iids) -> None:
+        """Marker ALLE sider i flere filer (flervalg i fillisten)."""
+        want = {p.uid for f in self.app.model.files if f.iid in set(iids)
+                for p in f.pages}
+        self._selected = [u for u in self.page_order if u in want]
+        self._anchor_uid = self._selected[0] if self._selected else None
+        self._selected_file = None
+        if len(self._selected) > 1:
+            self.set_select_mode(True)
+        if self._selected:
+            self.ensure_visible(self._selected[0])
         self.viewport().update()
         self.selection_changed.emit()
 
@@ -752,7 +827,14 @@ class ThumbnailGrid(QAbstractScrollArea):
             return super().mousePressEvent(event)
         mods = event.modifiers()
         if cell["kind"] == "header":
-            self.select_file(cell["entry"].iid)
+            entry = cell["entry"]
+            r = QRect(cell["x"], cell["y"] - self._offset(), cell["w"], cell["h"])
+            hit = self._header_check_rect(r).adjusted(-CHECK_PAD, -CHECK_PAD,
+                                                       CHECK_PAD, CHECK_PAD)
+            if self._has_file_check(entry) and hit.contains(event.position().toPoint()):
+                self.toggle_file_pages(entry.iid)
+            else:
+                self.select_file(entry.iid)
             return
         if cell["kind"] == "locked":
             return
@@ -1060,218 +1142,280 @@ class ThumbnailGrid(QAbstractScrollArea):
         self.viewport().update()
 
 
-class _FileItemDelegate(QStyledItemDelegate):
-    """Tegner en filpost som to linjer: navnet, og metadata daempet under.
+class FileDetailsView(QTreeWidget):
+    """Fillisten: én raekke pr. fil med navn, oprettelsesdato og sidetal.
 
-    Navnet og metalinjen laeses fra hver sin **item-rolle**, ikke fra én
-    ``"navn\\nmeta"``-streng. Det er ikke kosmetik: proppet ned i ``DisplayRole``
-    blev linjeskiftet fladet ud af viewets elide-tilstand, saa posten kom ud som
-    ``"Rapport.pd... - 4,3 KB"`` paa én linje. To roller kan ikke flettes.
+    Den er sidegitterets **anden visning** -- knappen nederst til venstre
+    skifter mellem de to i samme rude. Listen bygges fra ``EditModel`` hver
+    gang, ikke fra filerne paa disken: er en side flyttet fra én fil til en
+    anden, eller revet ud som sin egen fil, staar det sidetal og den post her
+    som gitteret viser. Den ejer ingen tilstand af sin egen.
 
-    Baggrunden (hover/markering) tegnes stadig af stilen, saa QSS'en gaelder.
+    Klik paa en kolonneoverskrift sorterer, klik igen vender -- men listen
+    sorterer ALDRIG sig selv (ingen ``setSortingEnabled``): klikket bliver til
+    en sortering af MODELLEN (``sort_requested``), som er sandheden om den
+    raekkefoelge der flettes i, og listen genopbygges fra den. Pilen viser
+    sorteringen saa laenge den holder; aendres raekkefoelgen paa anden vis
+    (traek, undo, Sorter-panelet), forsvinder den. Filer omordnes ogsaa ved traek.
+
+    Flere filer markeres med Ctrl/Shift-klik, eller med "Vaelg sider"-knappen,
+    som giver hver raekke et flueben og goer et almindeligt klik additivt --
+    samme tilstand som i gitteret, og den deles med det.
     """
 
-    META = Qt.ItemDataRole.UserRole + 1
-
-    def paint(self, painter, option, index):
-        opt = QStyleOptionViewItem(option)
-        self.initStyleOption(opt, index)
-        opt.text = ""                       # vi tegner selv teksten
-        widget = opt.widget
-        style = widget.style() if widget is not None else QApplication.style()
-        style.drawControl(QStyle.ControlElement.CE_ItemViewItem, opt, painter, widget)
-
-        r = opt.rect.adjusted(8, 5, -8, -5)
-        icon = index.data(Qt.ItemDataRole.DecorationRole)
-        if icon is not None and not icon.isNull():
-            sz = theme.ICON["small"]
-            icon.paint(painter, QRect(r.left(), r.top() + (r.height() - sz) // 2, sz, sz))
-            r.setLeft(r.left() + sz + theme.SPACE["sm"])
-
-        name = str(index.data(Qt.ItemDataRole.DisplayRole) or "")
-        meta = str(index.data(self.META) or "")
-        fm_name = QFontMetrics(theme.font("base"))
-        fm_meta = QFontMetrics(theme.font("small"))
-
-        painter.save()
-        painter.setFont(theme.font("base"))
-        painter.setPen(QColor(theme.C["text"]))
-        painter.drawText(
-            QRect(r.left(), r.top(), r.width(), fm_name.height()),
-            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
-            fm_name.elidedText(name, Qt.TextElideMode.ElideMiddle, r.width()))
-        painter.setFont(theme.font("small"))
-        painter.setPen(QColor(theme.C["text_muted"]))
-        painter.drawText(
-            QRect(r.left(), r.top() + fm_name.height(), r.width(), fm_meta.height()),
-            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
-            fm_meta.elidedText(meta, Qt.TextElideMode.ElideRight, r.width()))
-        painter.restore()
-
-    def sizeHint(self, option, index):
-        # Hoejden skal rumme BEGGE linjer plus luft. QSS'ens ``margin`` traekkes
-        # fra bagefter, saa der maa vaere plads til den ogsaa.
-        h = (QFontMetrics(theme.font("base")).height()
-             + QFontMetrics(theme.font("small")).height() + 18)
-        return QSize(120, h)
-
-
-class FileListPanel(QListWidget):
-    """Smal liste over de aabne filer.
-
-    Sidegitteret er fint til at arbejde i, men uoverskueligt naar der er mange
-    filer: filhovederne ligger spredt ud mellem hundredvis af fliser. Listen her
-    er et fast indeks -- klik paa en fil for at markere den og rulle hen til den.
-
-    Den genindfoerer **ikke** den gamle filvisning: den er en navigation, ikke en
-    redigeringsflade. Al mutation gaar fortsat gennem gitteret og modellen.
-    """
-
-    file_chosen = Signal(str)
-    files_reordered = Signal(list)         # ny iid-raekkefoelge
+    files_chosen = Signal(list)            # markerede iid'er i listeraekkefoelge
+    file_opened = Signal(str)              # dobbeltklik: vis filen i sidevisningen
+    context_file = Signal(str, object)     # iid, global position
+    files_reordered = Signal(list)         # [iid, indsaettelses-raekke]
+    sort_requested = Signal(str, bool)     # em.SORT_*-noegle, faldende
     external_drop = Signal(list, object)   # stier, indsaettelses-indeks
+
+    # "Dato i filnavn" vises kun naar Power-sorteringen har fundet mindst een.
+    COL_NAME, COL_DATE, COL_NAME_DATE, COL_PAGES = range(4)
 
     def __init__(self, parent, app):
         super().__init__(parent)
         self.app = app
         self._syncing = False
-        self.setObjectName("FileList")
-        # Traek-og-slip: omordn filer ved at traekke dem, og tag imod filer der
-        # slippes fra Stifinder. Vi bruger IKKE ``InternalMove``: Qt ville selv
-        # flytte raekkerne, og saa ville listen og modellen vaere ude af trit
-        # indtil naeste rebuild -- og flytningen kunne ikke fortrydes.
-        self.setDragEnabled(True)
-        self.setAcceptDrops(True)
-        self.setDropIndicatorShown(True)
-        self.setDragDropMode(QAbstractItemView.DragDropMode.DragDrop)
-        # **CopyAction, ikke MoveAction.** ``QAbstractItemView.startDrag``
-        # fjerner selv den trukne raekke, naar traekket ender som et
-        # ``MoveAction`` -- og det sker EFTER vores ``dropEvent``, altsaa oven i
-        # den liste vi lige har genopbygget fra modellen. Resultatet var at en
-        # fil forsvandt fra listen (men blev i modellen). Vi flytter selv i
-        # modellen, saa Qt skal holde fingrene fra raekkerne.
-        self.setDefaultDropAction(Qt.DropAction.CopyAction)
-        # Qt's egen drop-indikator er en haarfin streg, der naesten forsvinder i
-        # windows11-stilen. Vi tegner vores egen (se ``paintEvent``).
-        self.setDropIndicatorShown(False)
         self._drop_row_hint = None
         self._dragging_iid = None
+        self.setObjectName("FileDetails")
+        self.setColumnCount(4)
+        qt_util.pad_tree(self)
+        self.setRootIsDecorated(False)
+        self.setItemsExpandable(False)
+        self.setUniformRowHeights(True)
+        self.setSortingEnabled(False)
         self.setFrameShape(QFrame.Shape.NoFrame)
-        self.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
-        self.setUniformItemSizes(False)
-        self.setWordWrap(False)
-        # Delegaten eliderer selv hver linje for sig; viewets egen elide ville
-        # gaelde hele posten under ét.
-        self.setTextElideMode(Qt.TextElideMode.ElideNone)
+        self.select_mode = False
+        self.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        self.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self.setItemDelegate(_FileItemDelegate(self))
+        self.setIconSize(QSize(theme.ICON["small"], theme.ICON["small"]))
+        head = self.header()
+        head.setStretchLastSection(False)
+        head.setSectionsMovable(False)
+        head.setSectionResizeMode(self.COL_NAME, QHeaderView.ResizeMode.Stretch)
+        head.setSectionResizeMode(self.COL_DATE, QHeaderView.ResizeMode.ResizeToContents)
+        head.setSectionResizeMode(self.COL_NAME_DATE,
+                                  QHeaderView.ResizeMode.ResizeToContents)
+        head.setSectionResizeMode(self.COL_PAGES, QHeaderView.ResizeMode.ResizeToContents)
+        self._set_header_labels()
+        self.setColumnHidden(self.COL_NAME_DATE, True)
+        # Klik-sortering: se klassens docstring.
+        self._sort = None                  # (kolonne, faldende)
+        self._sorted_order = None          # modelraekkefoelgen sorteringen gav
+        head.setSectionsClickable(True)
+        head.sectionClicked.connect(self._on_header_clicked)
+        # Traek-og-slip som i gitteret: omordn filer, og tag imod filer fra
+        # Stifinder. **CopyAction, ikke MoveAction**: ``startDrag`` fjerner
+        # selv den trukne raekke naar traekket ender som Move -- EFTER vores
+        # ``dropEvent``, altsaa i den liste vi lige har genopbygget fra
+        # modellen. Filen forsvandt da fra listen (men blev i modellen).
+        self.setDragEnabled(True)
+        self.setAcceptDrops(True)
+        self.setDragDropMode(QAbstractItemView.DragDropMode.DragDrop)
+        self.setDefaultDropAction(Qt.DropAction.CopyAction)
+        # Qt's egen indikator er en haarfin streg i windows11-stilen; vi tegner
+        # vores egen (se ``paintEvent``).
+        self.setDropIndicatorShown(False)
+        self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.customContextMenuRequested.connect(self._on_context_menu)
         self.itemSelectionChanged.connect(self._on_selection)
+        self.itemDoubleClicked.connect(self._on_double_click)
+
+    _SORT_KEYS = {COL_NAME: em.SORT_NAME, COL_DATE: em.SORT_DATE,
+                  COL_NAME_DATE: em.SORT_NAME_DATE, COL_PAGES: em.SORT_PAGES}
+
+    def _on_header_clicked(self, col: int) -> None:
+        key = self._SORT_KEYS.get(col)
+        if key is None or not self.app.model.files:
+            return
+        desc = (not self._sort[1]) if self._sort and self._sort[0] == col else False
+        # Genopbygningen der foelger, maa ikke rydde den sortering den selv er.
+        self._sort, self._sorted_order = (col, desc), None
+        self.sort_requested.emit(key, desc)
+        self._sorted_order = [f.iid for f in self.app.model.files]
+        self._show_sort_mark()
+
+    def _show_sort_mark(self) -> None:
+        head = self.header()
+        if not hasattr(head, "set_sort_mark"):
+            return
+        if self._sort is None:
+            head.set_sort_mark((-1, Qt.SortOrder.AscendingOrder))
+        else:
+            col, desc = self._sort
+            head.set_sort_mark((col, Qt.SortOrder.DescendingOrder if desc
+                                else Qt.SortOrder.AscendingOrder))
+
+    def _set_header_labels(self) -> None:
+        self.setHeaderLabels([_("Filnavn"), _("Oprettet"), _("Dato i filnavn"),
+                              _("Sider")])
+        self.headerItem().setTextAlignment(
+            self.COL_PAGES, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+
+    def set_select_mode(self, on: bool) -> None:
+        """Flueben paa hver raekke, og et klik der laegger til i stedet for at
+        erstatte. Slaas den fra, er Ctrl/Shift-klik stadig flervalg."""
+        on = bool(on)
+        if on == self.select_mode:
+            return
+        self.select_mode = on
+        self.setSelectionMode(QAbstractItemView.SelectionMode.MultiSelection if on
+                              else QAbstractItemView.SelectionMode.ExtendedSelection)
+        self._sync_checks()
+
+    def _sync_checks(self) -> None:
+        """Fluebenene afspejler markeringen -- de er ikke en tilstand for sig.
+
+        Flaget GENSKABES bagefter i stedet for at nulstilles: kaldet sker ogsaa
+        midt i ``select_files``, og et nulstillet flag sendte da gitterets egen
+        markering retur som et klik i listen."""
+        was = self._syncing
+        self._syncing = True
+        try:
+            for i in range(self.topLevelItemCount()):
+                it = self.topLevelItem(i)
+                # Kun visning -- IKKE ``ItemIsUserCheckable``. I MultiSelection
+                # toggler et klik i feltet allerede raekken; et brugerafkrydseligt
+                # felt ville toggle én gang til, og klikket gjorde intet.
+                if self.select_mode:
+                    it.setCheckState(self.COL_NAME, Qt.CheckState.Checked
+                                     if it.isSelected() else Qt.CheckState.Unchecked)
+                else:
+                    it.setData(self.COL_NAME, Qt.ItemDataRole.CheckStateRole, None)
+        finally:
+            self._syncing = was
 
     def rebuild(self) -> None:
-        """Genopbyg listen fra modellen og bevar markeringen.
-
-        Hver post er **navn** paa foerste linje og **oprettelsesdato · stoerrelse**
-        paa anden -- de tre ting man skelner to ens navngivne filer paa. Sidetallet
-        staar i tooltippet sammen med den fulde sti; det kan man se i gitteret.
-        """
-        current = None
-        item = self.currentItem()
-        if item is not None:
-            current = item.data(Qt.ItemDataRole.UserRole)
+        """Genopbyg listen fra modellen og bevar markeringen."""
+        current = self._iid_of(self.currentItem())
+        chosen = set(self.selected_iids())
         self.blockSignals(True)
         self._syncing = True
         try:
             self.clear()
             for entry in self.app.model.files:
-                item = QListWidgetItem(Path(entry.path).name)
-                item.setData(_FileItemDelegate.META, self._meta_line(entry))
-                item.setData(Qt.ItemDataRole.UserRole, entry.iid)
-                item.setToolTip(self._tooltip(entry))
+                item = QTreeWidgetItem([
+                    Path(entry.path).name,
+                    ThumbnailGrid._fmt_date(entry.creation_date),
+                    ThumbnailGrid._fmt_date(entry.name_date),
+                    self._pages_text(entry)])
+                item.setData(self.COL_NAME, Qt.ItemDataRole.UserRole, entry.iid)
+                item.setToolTip(self.COL_NAME, entry.path)
+                # Samme accentfarve som den fundne dato i filhovedet.
+                item.setForeground(self.COL_NAME_DATE, theme.qc("accent"))
+                item.setTextAlignment(
+                    self.COL_PAGES,
+                    Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
                 lock = ThumbnailGrid._lock_icon_for(entry)
                 if lock is not None:
                     name, color = lock
-                    item.setIcon(icons_vector.qicon(name, theme.ICON["small"], color))
-                self.addItem(item)
+                    item.setIcon(self.COL_NAME,
+                                 icons_vector.qicon(name, theme.ICON["small"], color))
+                self.addTopLevelItem(item)
                 if entry.iid == current:
                     self.setCurrentItem(item)
+                if entry.iid in chosen:
+                    item.setSelected(True)
         finally:
             self._syncing = False
             self.blockSignals(False)
+        self.setColumnHidden(self.COL_NAME_DATE,
+                             not any(f.name_date for f in self.app.model.files))
+        if (self._sorted_order is not None
+                and self._sorted_order != [f.iid for f in self.app.model.files]):
+            self._sort = self._sorted_order = None      # sorteringen holder ikke mere
+        self._show_sort_mark()
+        self._sync_checks()
 
     @staticmethod
-    def _page_count(entry) -> int:
+    def _pages_text(entry) -> str:
+        """Sidetallet fra modellen -- ikke fra kildefilen. En fil man har
+        flyttet sider ud af, skal vise det tal den faktisk bliver gemt med."""
         if entry.pages_loaded:
-            return len(entry.pages)
+            return str(len(entry.pages))
         if entry.kind == em.KIND_IMAGE:
-            return 1
-        return entry.source_page_count
+            return "1"
+        n = int(entry.source_page_count or 0)
+        return str(n) if n else ""
 
     @staticmethod
-    def _meta_line(entry) -> str:
-        """``"25/12-2025 · 1,4 MB"``. Felter der endnu ikke er laest udelades,
-        saa linjen aldrig viser en tom plads eller et 0."""
-        parts = []
-        date = ThumbnailGrid._fmt_date(entry.creation_date)
-        if date:
-            parts.append(date)
-        size = int(getattr(entry, "size_bytes", 0) or 0)
-        if size:
-            parts.append(qt_util.fmt_bytes(size))
-        return "  ·  ".join(parts) if parts else _("Læser…")
+    def _iid_of(item):
+        if item is None:
+            return None
+        return item.data(FileDetailsView.COL_NAME, Qt.ItemDataRole.UserRole)
 
-    def _tooltip(self, entry) -> str:
-        n = self._page_count(entry)
-        pages = _("%(n)d sider") % {"n": n} if n != 1 else _("1 side")
-        return "%s\n%s" % (entry.path, pages)
+    def iids(self) -> list:
+        return [self._iid_of(self.topLevelItem(i)) for i in range(self.topLevelItemCount())]
 
-    def select_file(self, iid) -> None:
+    def selected_iids(self) -> list:
+        """De markerede filer i listens (= modellens) raekkefoelge."""
+        return [self._iid_of(it) for it in
+                (self.topLevelItem(i) for i in range(self.topLevelItemCount()))
+                if it.isSelected()]
+
+    def select_files(self, iids) -> None:
         """Afspejl gitterets markering uden at sende signalet retur."""
+        want = set(iids or ())
         self._syncing = True
         try:
-            if iid is None:
-                self.clearSelection()
-                self.setCurrentItem(None)
-            else:
-                for i in range(self.count()):
-                    it = self.item(i)
-                    if it.data(Qt.ItemDataRole.UserRole) == iid:
-                        self.setCurrentItem(it)
-                        break
+            first = None
+            for i in range(self.topLevelItemCount()):
+                it = self.topLevelItem(i)
+                on = self._iid_of(it) in want
+                it.setSelected(on)
+                if on and first is None:
+                    first = it
+            if first is not None and self._iid_of(self.currentItem()) not in want:
+                # ``setCurrentItem`` ville erstatte markeringen i ExtendedSelection.
+                self.setCurrentItem(first, 0,
+                                    QItemSelectionModel.SelectionFlag.NoUpdate)
+            if first is not None:
+                self.scrollToItem(first)
         finally:
             self._syncing = False
+        self._sync_checks()
 
     def _on_selection(self) -> None:
+        self._sync_checks()
         if self._syncing:
             return
-        item = self.currentItem()
-        if item is not None:
-            self.file_chosen.emit(item.data(Qt.ItemDataRole.UserRole))
+        self.files_chosen.emit(self.selected_iids())
+
+    def _on_double_click(self, item, _column) -> None:
+        iid = self._iid_of(item)
+        if iid is not None:
+            self.file_opened.emit(iid)
+
+    def _on_context_menu(self, pos) -> None:
+        item = self.itemAt(pos)
+        iid = self._iid_of(item)
+        if iid is None:
+            return
+        if not item.isSelected():
+            self.setCurrentItem(item)
+        self.context_file.emit(iid, self.viewport().mapToGlobal(pos))
 
     # ----------------------------------------------------------- traek/slip
     def _drop_row(self, pos) -> int:
         """Hvilken raekke et slip paa ``pos`` betyder "indsaet foran"."""
         item = self.itemAt(pos)
         if item is None:
-            return self.count()
-        row = self.row(item)
+            return self.topLevelItemCount()
+        row = self.indexOfTopLevelItem(item)
         r = self.visualItemRect(item)
         return row + 1 if pos.y() > r.center().y() else row
 
     def startDrag(self, supported_actions):  # noqa: N802 - Qt-API
-        """Husk hvad der traekkes, og koer traekket som en KOPI.
-
-        ``currentItem()`` er ikke paalideligt som "den trukne post": traekker man
-        en post uden foerst at markere den, peger den paa noget andet."""
-        item = self.currentItem()
-        self._dragging_iid = (item.data(Qt.ItemDataRole.UserRole)
-                              if item is not None else None)
+        self._dragging_iid = self._iid_of(self.currentItem())
         super().startDrag(Qt.DropAction.CopyAction)
         self._dragging_iid = None
         self._set_drop_row(None)
 
     def dragEnterEvent(self, event):  # noqa: N802 - Qt-API
-        mime = event.mimeData()
-        if event.source() is self or mime.hasUrls():
+        if event.source() is self or event.mimeData().hasUrls():
             event.acceptProposedAction()
         else:
             event.ignore()
@@ -1297,18 +1441,17 @@ class FileListPanel(QListWidget):
         row = self._drop_row_hint
         if row is None:
             return
-        # Indsaetnings-karet paa tvaers af listen, med vinger i begge ender, saa
-        # det er tydeligt MELLEM hvilke to filer der slippes.
-        from PySide6.QtGui import QPainter as _QP
-        p = _QP(self.viewport())
+        # Indsaetnings-karet paa tvaers af listen, med vinger i begge ender.
+        p = QPainter(self.viewport())
         accent = QColor(theme.C["drop_line"])
         w = self.viewport().width()
-        if self.count() == 0:
+        n = self.topLevelItemCount()
+        if n == 0:
             y = 4
-        elif row >= self.count():
-            y = self.visualItemRect(self.item(self.count() - 1)).bottom()
+        elif row >= n:
+            y = self.visualItemRect(self.topLevelItem(n - 1)).bottom()
         else:
-            y = self.visualItemRect(self.item(row)).top()
+            y = self.visualItemRect(self.topLevelItem(row)).top()
         y = max(2, min(self.viewport().height() - 3, y))
         p.setPen(Qt.PenStyle.NoPen)
         p.setBrush(accent)
@@ -1318,20 +1461,15 @@ class FileListPanel(QListWidget):
         p.end()
 
     def dropEvent(self, event):  # noqa: N802 - Qt-API
-        pos = event.position().toPoint()
-        row = self._drop_row(pos)
+        row = self._drop_row(event.position().toPoint())
         self._set_drop_row(None)
         if event.source() is self:
-            iid = self._dragging_iid
-            if iid is None:
-                item = self.currentItem()
-                iid = item.data(Qt.ItemDataRole.UserRole) if item is not None else None
+            iid = self._dragging_iid or self._iid_of(self.currentItem())
             if iid is None:
                 event.ignore()
                 return
             self.files_reordered.emit([iid, row])
-            # Ikke ``acceptProposedAction`` (= Move): saa ville view'et fjerne
-            # raekken bagefter. Se kommentaren ved setDefaultDropAction.
+            # Ikke ``acceptProposedAction`` (= Move) -- se ``__init__``.
             event.setDropAction(Qt.DropAction.CopyAction)
             event.accept()
             return
@@ -1344,7 +1482,7 @@ class FileListPanel(QListWidget):
 
 
 class PageView(QWidget):
-    """Filliste + sidegitter + kontinuerlig fremviser i et delt panel."""
+    """Sidegitter/filliste + kontinuerlig fremviser i et delt panel."""
 
     def __init__(self, parent, app):
         super().__init__(parent)
@@ -1362,23 +1500,36 @@ class PageView(QWidget):
         lay.setSpacing(theme.SPACE["sm"])
 
         self.splitter = QSplitter(Qt.Orientation.Horizontal, self)
-        # Fillisten MAA kunne klappes helt sammen -- den er en bekvemmelighed,
-        # ikke en fast del af fladen. De to andre ruder maa ikke.
-        self.splitter.setChildrenCollapsible(True)
+        self.splitter.setChildrenCollapsible(False)
         lay.addWidget(self.splitter, 1)
 
-        self.file_list = FileListPanel(self.splitter, app)
-        self.file_list.file_chosen.connect(self._on_file_chosen)
-        self.file_list.files_reordered.connect(self._on_files_reordered)
-        self.file_list.external_drop.connect(self._on_external_drop)
-        self.splitter.addWidget(self.file_list)
-
+        # Venstre rude har TO visninger i samme ramme: sidegitteret og
+        # fillisten. Knappen nederst til venstre skifter mellem dem. Begge
+        # bygges fra modellen, saa et skift aldrig mister en flytning.
         left = QWidget(self.splitter)
         ll = QVBoxLayout(left)
         ll.setContentsMargins(0, 0, 0, 0)
         ll.setSpacing(theme.SPACE["xs"])
-        self.grid = ThumbnailGrid(left, self)
-        ll.addWidget(self.grid, 1)
+        self._view_stack = QStackedWidget(left)
+        self.grid = ThumbnailGrid(self._view_stack, self)
+        self._view_stack.addWidget(self.grid)
+        # Fillisten faar luft omkring sig: tabellen er ellers klemt helt ud mod
+        # rudens kant og splitteren til fremviseren. Luften er margener paa en
+        # beholder -- ikke QSS, for selve tabellen tegnes af windows11-stilen.
+        self._list_host = QWidget(self._view_stack)
+        hl = QVBoxLayout(self._list_host)
+        hl.setContentsMargins(theme.SPACE["lg"], theme.SPACE["md"],
+                              theme.SPACE["xl"], theme.SPACE["md"])
+        self.file_list = FileDetailsView(self._list_host, app)
+        self.file_list.files_chosen.connect(self._on_files_chosen)
+        self.file_list.file_opened.connect(self._on_file_opened)
+        self.file_list.context_file.connect(self._file_context_menu)
+        self.file_list.files_reordered.connect(self._on_files_reordered)
+        self.file_list.sort_requested.connect(self._on_list_sort)
+        self.file_list.external_drop.connect(self._on_external_drop)
+        hl.addWidget(self.file_list)
+        self._view_stack.addWidget(self._list_host)
+        ll.addWidget(self._view_stack, 1)
         ll.addWidget(self._build_tile_bar(left))
         self.splitter.addWidget(left)
 
@@ -1392,17 +1543,12 @@ class PageView(QWidget):
         self.pcanvas.page_changed.connect(self._highlight_page)
         rl.addWidget(self.pcanvas, 1)
         self.splitter.addWidget(right)
-        self.splitter.setCollapsible(1, False)
-        self.splitter.setCollapsible(2, False)
-        self.splitter.setStretchFactor(0, 0)
-        self.splitter.setStretchFactor(1, 1)
-        self.splitter.setStretchFactor(2, 2)
+        self.splitter.setStretchFactor(0, 1)
+        self.splitter.setStretchFactor(1, 2)
         # Gitteret skal kunne vise mindst to fliser ved siden af hinanden --
         # ellers bliver det en enkelt lodret stribe, som er ubrugelig.
         left.setMinimumWidth(2 * self.grid.cell_w + 2 * PAD + 20)
-        self.file_list.setMinimumWidth(120)
-        self.file_list.setMaximumWidth(320)
-        self.splitter.setSizes([self.FILE_LIST_W, 320, 700])
+        self.splitter.setSizes([320, 700])
 
         self.grid.page_activated.connect(self.pcanvas.goto_page)
         self.grid.selection_changed.connect(self._report_selection)
@@ -1455,35 +1601,38 @@ class PageView(QWidget):
                                theme.SPACE["xxs"])
         row.setSpacing(theme.SPACE["xs"])
 
-        self._file_toggle = QToolButton(bar)
-        self._file_toggle.setObjectName("ToolIcon")
-        self._file_toggle.setCheckable(True)
-        self._file_toggle.setChecked(True)
-        self._file_toggle.setIcon(icons_vector.qicon("panel_left", theme.ICON["small"]))
-        self._file_toggle.setIconSize(QSize(theme.ICON["small"], theme.ICON["small"]))
-        self._file_toggle.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._file_toggle.toggled.connect(self.set_file_list_visible)
-        Tooltip.attach(self._file_toggle, _("Vis eller skjul fillisten"))
-        self._plain_icons.append((self._file_toggle, "panel_left", theme.ICON["small"], None))
-        row.addWidget(self._file_toggle)
+        # Knapperne her er 40 % stoerre end de oevrige smaa ikoner (``bar``):
+        # de er de eneste maal i hjoernet og skal kunne rammes uden at sigte.
+        bar_icon = theme.ICON["bar"]
+        self._view_toggle = QToolButton(bar)
+        self._view_toggle.setObjectName("ToolIcon")
+        self._view_toggle.setCheckable(True)
+        self._view_toggle.setIcon(icons_vector.qicon("file_list", bar_icon))
+        self._view_toggle.setIconSize(QSize(bar_icon, bar_icon))
+        self._view_toggle.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._view_toggle.toggled.connect(
+            lambda on: self.set_view_mode(self.VIEW_FILES if on else self.VIEW_PAGES))
+        Tooltip.attach(self._view_toggle, _("Skift mellem sidevisning og filliste"))
+        self._plain_icons.append((self._view_toggle, "file_list", bar_icon, None))
+        row.addWidget(self._view_toggle)
 
-        # "Vaelg sider" staar ved siden af filliste-knappen: begge aendrer hvad
+        # "Vaelg sider" staar ved siden af visningsknappen: begge aendrer hvad
         # man SER paa fladen, ikke hvad der staar i dokumentet.
         self._select_toggle = QToolButton(bar)
         self._select_toggle.setObjectName("ToolIcon")
         self._select_toggle.setCheckable(True)
-        self._select_toggle.setIcon(icons_vector.qicon("select_pages",
-                                                       theme.ICON["small"]))
-        self._select_toggle.setIconSize(QSize(theme.ICON["small"], theme.ICON["small"]))
+        self._select_toggle.setIcon(icons_vector.qicon("select_pages", bar_icon))
+        self._select_toggle.setIconSize(QSize(bar_icon, bar_icon))
         self._select_toggle.setCursor(Qt.CursorShape.PointingHandCursor)
         self._select_toggle.toggled.connect(self.grid.set_select_mode)
         # Slaar gitteret selv tilstanden til (Ctrl-klik, Ctrl+A), skal knappen
-        # foelge med -- ellers viser den noget andet end fladen goer.
+        # foelge med -- ellers viser den noget andet end fladen goer. Fillisten
+        # deler tilstanden: fluebenene staar i begge visninger eller i ingen.
         self.grid.select_mode_changed.connect(self._select_toggle.setChecked)
+        self.grid.select_mode_changed.connect(self.file_list.set_select_mode)
         Tooltip.attach(self._select_toggle,
                        _("Vælg flere sider med flueben. Slås også til af Ctrl-klik."))
-        self._plain_icons.append((self._select_toggle, "select_pages",
-                                  theme.ICON["small"], None))
+        self._plain_icons.append((self._select_toggle, "select_pages", bar_icon, None))
         row.addWidget(self._select_toggle)
         row.addStretch(1)
 
@@ -1513,22 +1662,40 @@ class PageView(QWidget):
                                   (big, "zoom_in", theme.ICON["small"]))
         return bar
 
-    FILE_LIST_W = 190
+    VIEW_PAGES = "pages"
+    VIEW_FILES = "files"
 
-    def set_file_list_visible(self, on: bool) -> None:
-        """Klap fillisten sammen eller ud.
+    def view_mode(self) -> str:
+        return (self.VIEW_FILES if self._view_stack.currentWidget() is self._list_host
+                else self.VIEW_PAGES)
 
-        Bredden tages fra (og gives tilbage til) gitteret ved siden af, saa
-        fremviseren til hoejre ikke flytter sig."""
-        files, grid, viewer = self.splitter.sizes()
-        if on:
-            if files < 40:
-                self.splitter.setSizes(
-                    [self.FILE_LIST_W, max(160, grid - self.FILE_LIST_W), viewer])
+    def set_view_mode(self, mode: str) -> None:
+        """Skift venstre rude mellem sidegitteret og fillisten.
+
+        Fillisten genopbygges fra modellen ved hvert skift, saa den viser
+        praecis de filer og sidetal gitteret gjorde -- ogsaa efter sider er
+        flyttet mellem filer eller revet ud. Knapperne i hjoernet bliver staaende;
+        skyderen, der kun giver mening for fliser, slaas fra. "Vaelg sider"
+        virker i begge: i fillisten giver den flueben paa filerne."""
+        files = mode == self.VIEW_FILES
+        if files:
+            self.file_list.rebuild()
+            self.file_list.select_files(self._current_file_iids())
+            self._view_stack.setCurrentWidget(self._list_host)
         else:
-            self.splitter.setSizes([0, files + grid, viewer])
-        if self._file_toggle.isChecked() != on:
-            self._file_toggle.setChecked(on)
+            self._view_stack.setCurrentWidget(self.grid)
+            self.grid.rebuild()
+        self._tile_slider.setEnabled(not files)
+        if self._view_toggle.isChecked() != files:
+            self._view_toggle.setChecked(files)
+
+    def _current_file_iids(self) -> list:
+        """De filer markeringen i gitteret daekker: den markerede fil, ellers
+        hver fil der har en markeret side."""
+        iid = self.grid.selected_file()
+        if iid:
+            return [iid]
+        return em.files_touched(self.app.model, self.grid.selected_uids())
 
     def tile_scale(self) -> int:
         return self.grid.tile_scale
@@ -1539,6 +1706,18 @@ class PageView(QWidget):
         except (TypeError, ValueError):
             return
         self._tile_slider.setValue(percent)     # valueChanged driver gitteret
+
+    def _on_list_sort(self, key: str, desc: bool) -> None:
+        """Klik paa en overskrift i fillisten: sorter HELE listen i modellen,
+        som eet undo-trin -- samme kommando som Sorter-panelet bruger."""
+        model = self.app.model
+        before = [f.iid for f in model.files]
+        if em.sort_order(model.files, key, desc) == before:
+            self.file_list.rebuild()          # intet at fortryde; kun pilen skifter
+            return
+        self.app.undo_stack.push(em.sort_files_cmd(model, key, desc))
+        self.rebuild()
+        self.app.after_model_change()
 
     def _on_files_reordered(self, payload) -> None:
         """Slip i fillisten: flyt filen (med sine udtrukne boern) til den plads.
@@ -1568,11 +1747,30 @@ class PageView(QWidget):
         self.grid.select_file(iid)
         self.app.after_model_change()
 
+    def _on_files_chosen(self, iids: list) -> None:
+        """Markering i fillisten. Én fil markeres som fil; flere markeres som
+        ALLE deres sider -- samme markering som filhovedernes flueben giver,
+        saa roter/slet/flyt/gem virker paa dem som i gitteret."""
+        if not iids:
+            return
+        if len(iids) == 1:
+            self._on_file_chosen(iids[0])
+            return
+        self.grid.select_files(iids)
+
     def _on_file_chosen(self, iid: str) -> None:
-        """Klik i fillisten: markér filen og rul hen til dens hoved."""
+        """Klik i fillisten: markér filen, og vis dens første side i fremviseren."""
         self.grid.select_file(iid)
         self.grid.ensure_visible("h:" + iid)
         self.grid.viewport().update()
+        entry = self.app.model.entry_by_iid(iid)
+        if entry is not None and entry.pages:
+            self.pcanvas.goto_page(entry.pages[0].uid)
+
+    def _on_file_opened(self, iid: str) -> None:
+        """Dobbeltklik i fillisten: skift til sidevisningen ved filen."""
+        self.set_view_mode(self.VIEW_PAGES)
+        self._on_file_chosen(iid)
 
     def refresh_themed_icons(self) -> None:
         """Gentegn vaerktoejslinjens ikoner efter et lys/moerk-skift."""
@@ -1601,7 +1799,7 @@ class PageView(QWidget):
             except RuntimeError:
                 pass
         self.file_list.rebuild()
-        self.file_list.select_file(self.grid.selected_file())
+        self.file_list.select_files(self._current_file_iids())
         self.grid.viewport().update()
         self.pcanvas.viewport().update()
         self.welcome.refresh_theme()
@@ -1610,16 +1808,16 @@ class PageView(QWidget):
     def rebuild(self) -> None:
         self.grid.rebuild()
         self.file_list.rebuild()
-        self.file_list.select_file(self.grid.selected_file())
+        self.file_list.select_files(self._current_file_iids())
         self.pcanvas.set_document()
         self._update_welcome()
 
     def refresh_header(self, iid) -> None:
         """Hovedet males af gitteret, saa en gentegning er alt der skal til.
-        Fillisten viser samme navn/haengelaas og opdateres med."""
+        Fillisten viser samme navn/dato/haengelaas og opdateres med."""
         self.grid.viewport().update()
         self.file_list.rebuild()
-        self.file_list.select_file(self.grid.selected_file())
+        self.file_list.select_files(self._current_file_iids())
 
     def selected_uids(self) -> list:
         return self.grid.selected_uids()
@@ -1673,8 +1871,8 @@ class PageView(QWidget):
 
     # ------------------------------------------------------------ status
     def _report_selection(self) -> None:
+        self.file_list.select_files(self._current_file_iids())
         iid = self.grid.selected_file()
-        self.file_list.select_file(iid)
         if iid:
             entry = self.app.model.entry_by_iid(iid)
             if entry is not None:

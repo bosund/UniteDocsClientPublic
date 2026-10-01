@@ -271,6 +271,18 @@ def _i_down(p):
     p.arrow_head((0.50, 0.88), 90, 0.24)
 
 
+@icon("back")
+def _i_back(p):
+    p.line((0.90, 0.50), (0.32, 0.50), caps=False)
+    p.arrow_head((0.12, 0.50), 180, 0.24)
+
+
+@icon("next")
+def _i_next(p):
+    p.line((0.10, 0.50), (0.68, 0.50), caps=False)
+    p.arrow_head((0.88, 0.50), 0, 0.24)
+
+
 @icon("top")
 def _i_top(p):
     p.line((0.16, 0.14), (0.84, 0.14), caps=False)
@@ -517,11 +529,12 @@ def _i_key(p):
     p.line((0.60, 0.64), (0.70, 0.54), caps=False)
 
 
-@icon("panel_left")
-def _i_panel_left(p):
-    """Ramme med en udfyldt kolonne til venstre -- vis/skjul sidepanel."""
-    p.rect(0.12, 0.18, 0.88, 0.82, r=0.06)
-    p.frect(0.16, 0.22, 0.40, 0.78, r=0.04)
+@icon("file_list")
+def _i_file_list(p):
+    """Tre raekker med et punkt og en linje -- skift til fillisten."""
+    for y in (0.26, 0.50, 0.74):
+        p.frect(0.12, y - 0.06, 0.24, y + 0.06, r=0.02)
+        p.line((0.36, y), (0.88, y), caps=False)
 
 
 @icon("select_pages")

@@ -26,6 +26,7 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+import threading
 import time
 import uuid
 from pathlib import Path
@@ -61,7 +62,7 @@ from .logging_config import get_logger
 from .page_view import PageView
 from .qt_util import LinkLabel, muted_label
 from .tooltip import Tooltip
-from .undo_stack import Command, UndoStack
+from .undo_stack import Command, N_, UndoStack
 
 logger = get_logger(__name__)
 
@@ -76,13 +77,27 @@ _SUPPORTED_DROP_EXTENSIONS = {".pdf", ".jpg", ".jpeg", ".png", ".bmp", ".tiff", 
 
 class MainWindow(QMainWindow):
 
-    # Sorterings-panelets raekker: (noegle, label, har_retning)
-    _SORT_ROWS = (
-        (em.SORT_REVERSE, "Omvendt", False),
-        (em.SORT_DATE, "Oprettelsesdato", True),
-        (em.SORT_NAME, "Navn", True),
-        (em.SORT_SIZE, "Størrelse", True),
-    )
+    # Power-sortering er en raekke i Sorter-panelet, men ikke en sorteringsnoegle
+    # i modellen: den aabner en dialog.
+    _SORT_POWER = "power"
+
+    @classmethod
+    def _sort_rows(cls):
+        """Sorterings-panelets raekker: (noegle, label, har_retning); ``None``
+        er en skillelinje.
+
+        Bygges ved hvert kald med BOGSTAVELIGE _()-kald: en tabel med danske
+        strenge der foerst oversaettes som ``_(label)``, kan Babel ikke se, og
+        panelet stod derfor paa dansk i alle sprog."""
+        return (
+            # Oeverst og adskilt: den eneste raekke der aabner et vindue.
+            (cls._SORT_POWER, _("Power-sortering…"), False),
+            None,
+            (em.SORT_REVERSE, _("Omvendt"), False),
+            (em.SORT_DATE, _("Oprettelsesdato"), True),
+            (em.SORT_NAME, _("Navn"), True),
+            (em.SORT_SIZE, _("Størrelse"), True),
+        )
 
     def __init__(self, initial_files: list[str] | None = None):
         super().__init__()
@@ -456,11 +471,17 @@ class MainWindow(QMainWindow):
             sizes = [int(v) for v in
                      (cfg.get(self._SESSION, "splitter", fallback="") or "").split(",")
                      if v.strip()]
-            if len(sizes) == 3 and sum(sizes) > 0:
+            # Tidligere var der tre ruder (filpanel, gitter, fremviser); en
+            # gammel vaerdi ignoreres og giver standardlayoutet.
+            if len(sizes) == 2 and sum(sizes) > 0:
                 self.page_view.splitter.setSizes(sizes)
-                self.page_view.set_file_list_visible(sizes[0] > 20)
         except Exception as e:
             logger.debug("Kunne ikke genskabe panelbredder: %s", e)
+        try:
+            self.page_view.set_view_mode(
+                cfg.get(self._SESSION, "view", fallback="pages"))
+        except Exception as e:
+            logger.debug("Kunne ikke genskabe visningen: %s", e)
         try:
             self.page_view.set_tile_scale(
                 cfg.getint(self._SESSION, "tile_scale", fallback=100))
@@ -478,6 +499,7 @@ class MainWindow(QMainWindow):
                         ",".join(str(v) for v in self.page_view.splitter.sizes()))
                 cfg.set(self._SESSION, "tile_scale",
                         str(self.page_view.tile_scale()))
+                cfg.set(self._SESSION, "view", self.page_view.view_mode())
             cfg.save()
         except Exception as e:
             logger.warning("Kunne ikke gemme sessionen: %s", e)
@@ -535,6 +557,8 @@ class MainWindow(QMainWindow):
 
         current = __version__
         updates_dir = self._updates_dir()
+        # Paa UI-traaden, foer workeren: config er ikke traadsikker (regel 5).
+        install_id = updater.get_install_id(self.config)
 
         def worker():
             try:
@@ -542,7 +566,7 @@ class MainWindow(QMainWindow):
             except Exception as exc:      # oprydning maa aldrig vaelte tjekket
                 logger.debug("Oprydning i %s fejlede: %s", updates_dir, exc)
             try:
-                info, err = updater.check(current), None
+                info, err = updater.check(current, install_id=install_id), None
             except Exception as exc:
                 info, err = None, exc
             self._queue.put((self._on_update_check_result, (info, manual, err)))
@@ -811,7 +835,7 @@ class MainWindow(QMainWindow):
         self.model.populate_pages(entry, count)
         at = len(self.model.files) if index is None else index
         self.undo_stack.push(Command(
-            "Indsæt side",
+            N_("Indsæt side"),
             lambda: self.model.add_file(entry, at),
             lambda: self.model.remove_file(entry.iid)))
         if self.page_view is not None:
@@ -1162,7 +1186,7 @@ class MainWindow(QMainWindow):
             for idx, entry in sorted(removed, key=lambda t: t[0]):
                 self.model.add_file(entry, idx)
 
-        self.undo_stack.push(Command("Slet fil", do, undo))
+        self.undo_stack.push(Command(N_("Slet fil"), do, undo))
         if self.page_view is not None:
             self.page_view.rebuild()
         self._refresh_status()
@@ -1192,7 +1216,9 @@ class MainWindow(QMainWindow):
         if self.page_view is None:
             return
         sel = self.page_view.selected_uids()
-        if sel:
+        if self._spans_files(sel):
+            self.undo_stack.push(em.move_across_files_cmd(self.model, sel, direction))
+        elif sel:
             cmd = em.nudge_pages_cmd(self.model, sel, direction)
             if cmd is None:
                 return
@@ -1204,6 +1230,13 @@ class MainWindow(QMainWindow):
             return
         self.page_view.rebuild()
         self.page_view.reselect(sel)
+
+    def _spans_files(self, sel) -> bool:
+        """Spaender markeringen over FLERE filer, bliver filerne hver for sig:
+        hele filer flyttes som filer, dele af en fil rives ud som egen fil.
+        Ellers ville pilene flette det hele sammen til een fil. Inden for een
+        fil beholdes side-adfaerden (den kan bevidst skubbes ind i nabofilen)."""
+        return len(em.files_touched(self.model, sel)) >= 2
 
     def _up(self) -> None:
         self._nudge(-1)
@@ -1222,7 +1255,10 @@ class MainWindow(QMainWindow):
         if self.page_view is None or not self.model.files:
             return
         sel = self.page_view.selected_uids()
-        if sel:
+        if self._spans_files(sel):
+            self.undo_stack.push(em.move_across_files_cmd(
+                self.model, sel, 1 if to_end else -1, edge=True))
+        elif sel:
             entry = self.model.page_by_uid(sel[0])[0]
             # Er filen allerede yderst og bestaar kun af markeringen, er der intet
             # at goere -- ellers ville vi slette og genskabe en identisk fil.
@@ -1265,7 +1301,7 @@ class MainWindow(QMainWindow):
         if self._sort_panel is not None:
             self._close_sort_panel()
             return
-        panel = dialogs.SortPanel(self, self._SORT_ROWS, self._sort_dir)
+        panel = dialogs.SortPanel(self, self._sort_rows(), self._sort_dir)
         panel.chosen.connect(self._apply_sort)
         panel.destroyed.connect(self._on_sort_panel_closed)
         self._sort_panel = panel
@@ -1285,24 +1321,98 @@ class MainWindow(QMainWindow):
     def _apply_sort(self, key: str) -> None:
         if not self.model.files:
             return
+        if key == self._SORT_POWER:
+            self._close_sort_panel()
+            self._open_power_sort()
+            return
         reverse = self._sort_dir.get(key, False)
-        self.undo_stack.push(em.sort_files_cmd(self.model, key, reverse))
+        # Spaender markeringen over flere filer, sorteres KUN de filer -- paa de
+        # pladser de allerede staar paa. Ellers hele listen.
+        sel = self.page_view.selected_uids() if self.page_view is not None else []
+        only = em.files_touched(self.model, sel) if self._spans_files(sel) else None
+        self.undo_stack.push(em.sort_files_cmd(self.model, key, reverse, only))
         if key != em.SORT_REVERSE:
             # Andet klik paa samme noegle vender retningen.
             self._sort_dir[key] = not reverse
         if self.page_view is not None:
             self.page_view.rebuild()
+            if only:
+                self.page_view.reselect(sel)
         self._refresh_status()
         # Panelet bliver staaende (det er hele pointen) -- gentegn kun pilene.
         if self._sort_panel is not None:
             btn = self._sort_btn
             self._close_sort_panel()
-            panel = dialogs.SortPanel(self, self._SORT_ROWS, self._sort_dir)
+            panel = dialogs.SortPanel(self, self._sort_rows(), self._sort_dir)
             panel.chosen.connect(self._apply_sort)
             panel.destroyed.connect(self._on_sort_panel_closed)
             self._sort_panel = panel
             self._sort_btn.setChecked(True)
             panel.popup_under(btn)
+
+    def _open_power_sort(self) -> None:
+        """Power-sortering: hele filer efter oprettelse, PDF-dato eller en dato
+        i filnavnet. Se ``power_sort.py``.
+
+        Den sorterer FILER efter filens egne data, saa den kraever at hver fil
+        stadig er den fil den kom fra. Er sider flyttet mellem filer (eller
+        revet ud som egen fil), tilbydes en nulstilling foerst -- som eget
+        undo-trin, saa den kan fortrydes uafhaengigt af sorteringen."""
+        from . import power_sort
+        if not self.model.files:
+            return
+        if em.pages_moved_between_files(self.model):
+            if not qt_util.ask_yes_no(
+                    self, _("Power-sortering"),
+                    _("Der er flyttet sider mellem filerne. Power-sortering "
+                      "sorterer hele filer, så visningen skal nulstilles først: "
+                      "hver side føres tilbage til den fil den kom fra.\n\n"
+                      "Rotation, beskæring og maskering bevares, og "
+                      "nulstillingen kan fortrydes.\n\nNulstil visningen nu?")):
+                return
+            self.undo_stack.push(em.reset_layout_cmd(self.model))
+            if self.page_view is not None:
+                self.page_view.rebuild()
+            self._refresh_status()
+
+        rows = [(f.iid, f.path, f.name_date) for f in self.model.files]
+        dlg = power_sort.PowerSortDialog(self, rows)
+        # Datoerne laeses i en worker (PDF'erne skal aabnes). Workeren ser kun
+        # stierne, kodeordene (snapshottet her, regel 5) og stop-flaget;
+        # resultatet leveres paa UI-traaden via koeen.
+        stop = threading.Event()
+
+        def deliver(iid, dates):
+            if not stop.is_set():
+                dlg.set_dates(iid, dates)
+
+        qt_util.run_in_thread(self._power_sort_worker, [r[:2] for r in rows],
+                              list(self._get_all_passwords()), stop, deliver,
+                              name="power-sort-dates")
+        try:
+            result = dlg.run()
+        finally:
+            stop.set()
+        if not result:
+            return
+        order, dates = result
+        same_order = order == [f.iid for f in self.model.files]
+        same_dates = dates is None or all(
+            f.name_date == dates.get(f.iid, "") for f in self.model.files)
+        if same_order and same_dates:
+            return
+        self.undo_stack.push(em.power_sort_cmd(self.model, order, dates))
+        if self.page_view is not None:
+            self.page_view.rebuild()
+        self._refresh_status()
+
+    def _power_sort_worker(self, rows, pw_list, stop, deliver) -> None:
+        for iid, path in rows:
+            if stop.is_set():
+                return
+            with pdf_renderer.PDF_LOCK:
+                dates = pdf_utils.get_file_dates(path, pw_list)
+            self._queue.put((deliver, (iid, dates)))
 
     # ------------------------------------------------------------------
     # Maskering: bekræftelse før gem
@@ -2142,10 +2252,13 @@ class MainWindow(QMainWindow):
                 dlg.close()
             setattr(self, attr, None)
 
+        view = self.page_view.view_mode() if self.page_view is not None else None
         self.undo_stack.unsubscribe(self._update_undo_buttons)
         self._build_ui()
         if self.page_view is not None:
             self.page_view.rebuild()
+            if view:
+                self.page_view.set_view_mode(view)
         self._refresh_status()
 
     # ==================================================================
@@ -2296,7 +2409,7 @@ class MainWindow(QMainWindow):
             return
 
         self.undo_stack.push(em.add_annotations_batch_cmd(
-            self.model, items, title=_("Automatisk anonymisering")))
+            self.model, items, title=N_("Automatisk anonymisering")))
         if self.page_view is not None:
             self.page_view.pcanvas.redraw_overlays()
         self.set_status(_("%d maskeringer tilføjet") % len(items),

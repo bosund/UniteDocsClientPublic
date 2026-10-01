@@ -19,6 +19,18 @@ import time
 from dataclasses import dataclass, field
 from typing import Callable
 
+def N_(text: str) -> str:
+    """Marker en undo-etiket til oversaettelse UDEN at oversaette den nu.
+
+    ``Command.label_key`` gemmes uoversat og koeres foerst gennem ``_()`` naar
+    historikken vises -- saa et sprogskift ogsaa gaelder trin der allerede
+    ligger paa stakken. Men Babel ser kun bogstavelige ``_("...")``-kald; en
+    bar streng som foerste argument til ``Command`` kom aldrig i katalogerne,
+    og historikken stod paa dansk i alle sprog. ``N_`` er en identitetsfunktion som
+    ``update_locales.py``/``check_locales.py`` udtraekker som noegleord."""
+    return text
+
+
 # Consecutive commands sharing a coalesce_key merge into a single undo step if
 # they arrive within this window (so a quick multi-step rotate is one Ctrl+Z).
 COALESCE_WINDOW = 1.2
@@ -26,7 +38,7 @@ COALESCE_WINDOW = 1.2
 
 @dataclass
 class Command:
-    label_key: str                       # UNtranslated; localize at display via _()
+    label_key: str                       # N_("...")-markeret; oversaettes ved visning
     do: Callable[[], None]
     undo: Callable[[], None]
     coalesce_key: str | None = None

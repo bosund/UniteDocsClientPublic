@@ -30,6 +30,7 @@ from PySide6.QtWidgets import (QAbstractScrollArea, QApplication, QDialog,
                                QFrame, QMenu, QPlainTextEdit, QPushButton,
                                QVBoxLayout, QLabel)
 
+from .undo_stack import N_
 from . import annotations as an
 from . import edit_model as em
 from . import icons_vector
@@ -229,7 +230,7 @@ class PageCanvas(QAbstractScrollArea):
             return True
         # Frisk uid, saa remove(old)/add(new) i do/undo ikke kolliderer.
         new_spec = dataclasses.replace(spec, color=new_color, uid=uuid.uuid4().hex)
-        self._swap_annotation(page_uid, spec, new_spec, "Skift farve")
+        self._swap_annotation(page_uid, spec, new_spec, N_("Skift farve"))
         return True
 
     def _swap_annotation(self, page_uid, old_spec, new_spec, label: str) -> None:
@@ -970,7 +971,7 @@ class PageCanvas(QAbstractScrollArea):
         new_spec = em.AnnotationSpec(
             kind=an.ANNOT_FREETEXT, rects=(self._fit_freetext(r, new_text, spec.fontsize),),
             text=new_text, color=spec.color, fontsize=spec.fontsize)
-        self._swap_annotation(page_uid, spec, new_spec, "Rediger tekst")
+        self._swap_annotation(page_uid, spec, new_spec, N_("Rediger tekst"))
 
     def contextMenuEvent(self, event):  # noqa: N802 - Qt-API
         """Hoejreklik i fremviseren. Er der markeret tekst, tilbydes handlinger

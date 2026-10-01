@@ -19,9 +19,10 @@ from __future__ import annotations
 
 import threading
 
-from PySide6.QtCore import QObject, Qt, Signal
+from PySide6.QtCore import QObject, QSize, Qt, Signal
 from PySide6.QtGui import QCursor, QDesktopServices
-from PySide6.QtWidgets import (QDialog, QDialogButtonBox, QHBoxLayout, QLabel,
+from PySide6.QtWidgets import (QHeaderView, QStyle, QStyledItemDelegate,
+                               QStyleOptionHeader, QStyleOptionViewItem, QDialog, QDialogButtonBox, QHBoxLayout, QLabel,
                                QMessageBox, QProgressBar, QPushButton,
                                QVBoxLayout, QWidget)
 
@@ -369,3 +370,108 @@ def button_row(parent, *buttons, align_right: bool = True) -> QWidget:
     for b in buttons:
         lay.addWidget(b)
     return row
+
+
+# --------------------------------------------------------------------------
+# Luft i listeceller
+# --------------------------------------------------------------------------
+class PaddedItemDelegate(QStyledItemDelegate):
+    """Vandret luft i hver celle, saa fx et hoejrestillet sidetal ikke staar
+    klistret op ad cellens kant.
+
+    Uden QSS: et ``::item { padding }`` ville lade stylesheet-motoren tegne
+    raekkerne i stedet for Windows (CLAUDE.md regel 6). Her tegner stilen selv
+    baggrund og markering paa HELE cellen, og indholdet (tekst, ikon, flueben)
+    derefter i et indrykket rektangel -- uden sin egen baggrund, ellers blev
+    windows11's gennemsigtige markering lagt paa to gange.
+    """
+
+    def __init__(self, parent=None, pad: int | None = None):
+        super().__init__(parent)
+        self.pad = theme.SPACE["md"] if pad is None else pad
+
+    def paint(self, painter, option, index):
+        opt = QStyleOptionViewItem(option)
+        self.initStyleOption(opt, index)
+        widget = opt.widget
+        style = widget.style() if widget is not None else None
+        if style is None:
+            return super().paint(painter, option, index)
+        style.drawPrimitive(QStyle.PrimitiveElement.PE_PanelItemViewItem,
+                            opt, painter, widget)
+        inner = QStyleOptionViewItem(opt)
+        inner.rect = opt.rect.adjusted(self.pad, 0, -self.pad, 0)
+        inner.state &= ~(QStyle.StateFlag.State_Selected
+                         | QStyle.StateFlag.State_MouseOver
+                         | QStyle.StateFlag.State_HasFocus)
+        # windows11 markerer med en lys, gennemsigtig flade og beholder den
+        # normale tekstfarve, saa ``Text`` er den rigtige farve ogsaa her.
+        inner.backgroundBrush = Qt.BrushStyle.NoBrush
+        style.drawControl(QStyle.ControlElement.CE_ItemViewItem, inner, painter, widget)
+
+    def sizeHint(self, option, index):
+        size = super().sizeHint(option, index)
+        return QSize(size.width() + 2 * self.pad, size.height())
+
+
+class PaddedHeader(QHeaderView):
+    """Kolonneoverskrifter med samme luft som :class:`PaddedItemDelegate`,
+    saa "Sider" staar lodret over sidetallene.
+
+    Sektionens flade tegnes af stilen paa hele rektanglet; kun etiketten
+    rykkes ind. Sorteringspilen placeres af stilen selv, som foer."""
+
+    def __init__(self, orientation=Qt.Orientation.Horizontal, parent=None,
+                 pad: int | None = None):
+        super().__init__(orientation, parent)
+        self.pad = theme.SPACE["md"] if pad is None else pad
+        # ``(sektion, Qt.SortOrder)`` naar ejeren selv styrer pilen i stedet
+        # for Qt's sorteringsindikator (se ``FileDetailsView``). ``None`` =
+        # Qt's egen indikator, som i Power-sorteringens liste.
+        self.sort_mark = None
+        # QTreeView's egen header er venstrestillet; en ny QHeaderView centrerer.
+        self.setDefaultAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+
+    def paintSection(self, painter, rect, index):
+        if not rect.isValid():
+            return
+        opt = QStyleOptionHeader()
+        self.initStyleOptionForIndex(opt, index)
+        opt.rect = rect
+        if self.sort_mark is not None:
+            col, order = self.sort_mark
+            # Samme oversaettelse som QHeaderView selv: stigende = SortDown.
+            opt.sortIndicator = (
+                QStyleOptionHeader.SortIndicator.None_ if index != col
+                else QStyleOptionHeader.SortIndicator.SortDown
+                if order == Qt.SortOrder.AscendingOrder
+                else QStyleOptionHeader.SortIndicator.SortUp)
+        style = self.style()
+        painter.save()
+        style.drawControl(QStyle.ControlElement.CE_HeaderSection, opt, painter, self)
+        label = QStyleOptionHeader(opt)
+        label.rect = rect.adjusted(self.pad, 0, -self.pad, 0)
+        style.drawControl(QStyle.ControlElement.CE_HeaderLabel, label, painter, self)
+        if opt.sortIndicator != QStyleOptionHeader.SortIndicator.None_:
+            arrow = QStyleOptionHeader(opt)
+            arrow.rect = style.subElementRect(QStyle.SubElement.SE_HeaderArrow, opt, self)
+            style.drawPrimitive(QStyle.PrimitiveElement.PE_IndicatorHeaderArrow,
+                                arrow, painter, self)
+        painter.restore()
+
+    def set_sort_mark(self, mark) -> None:
+        self.sort_mark = mark
+        self.viewport().update()
+
+    def sectionSizeFromContents(self, index):
+        size = super().sectionSizeFromContents(index)
+        # Plads til pilen ogsaa naar den kommer fra ``sort_mark``.
+        return QSize(size.width() + 2 * self.pad, size.height())
+
+
+def pad_tree(tree) -> None:
+    """Giv en ``QTreeWidget`` luft i celler OG overskrifter -- de to skal foelges
+    ad, ellers staar overskriften ikke over sin kolonne. Kald foer
+    kolonnernes ``setSectionResizeMode``: en ny header nulstiller dem."""
+    tree.setHeader(PaddedHeader(Qt.Orientation.Horizontal, tree))
+    tree.setItemDelegate(PaddedItemDelegate(tree))

@@ -20,7 +20,7 @@ Markdown==3.10.3
 tabulate==0.10.0
 
 # Transitive via EbookLib — pinned explicitly for reproducible builds.
-lxml==6.0.2
+lxml==6.1.3
 six==1.17.0
 
 # Cryptographic primitives for fast password verification (AES/RC4).
@@ -29,14 +29,14 @@ six==1.17.0
 pycryptodome==3.23.0
 
 # Image Processing
-Pillow==12.2.0
+Pillow==12.3.0
 
 # UI. PySide6 (Qt for Python) er den eneste GUI-motor fra 9.0.0. LGPL-3.0 —
 # forenelig med appens AGPL-3.0, sa laenge Qt linkes DYNAMISK (det gor det:
 # bade Nuitka og PyInstaller kopierer Qt-DLL'erne ved siden af exe'en).
 # *-Essentials udelader WebEngine/Charts/3D, som appen ikke bruger.
 # sv-ttk og tkinterdnd2 blev fjernet sammen med Tkinter i 9.0.0.
-PySide6-Essentials==6.9.1
+PySide6-Essentials==6.11.2
 
 # DEVELOPMENT DEPENDENCIES (Only required for building/development)
 # Internationalization tools (for updating/compiling translations)
@@ -44,7 +44,7 @@ Babel==2.18.0
 
 # Build tools (for creating executable)
 pyinstaller==6.19.0
-nuitka==4.1.3
+nuitka==4.2.2
 
 # --- Automatisk anonymisering ------------------------------------------
 # Microsoft Presidio finder personoplysninger (CPR, navne, adresser, ...).

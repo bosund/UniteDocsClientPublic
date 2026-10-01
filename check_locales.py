@@ -125,7 +125,7 @@ def source_msgids() -> set:
     for _fil, _linje, message, _kommentar, _ctx in extract_from_dir(
             str(CLIENT / "app"),
             method_map=[("**.py", "python")],
-            keywords={"_": None}):
+            keywords={"_": None, "N_": None}):     # N_: undo-etiketter
         if isinstance(message, str):
             ud.add(message)
         elif message and isinstance(message[0], str):

@@ -84,6 +84,9 @@ class FileEntry:
     enc_key: str                      # pdf_utils.ENC_* — the stable key, not a label
     creation_date: str = ""
     size_bytes: int = 0               # os.path.getsize; 0 = ukendt. Kun til sortering.
+    # Datoen Power-sorteringen fandt i filnavnet ("YYYY-MM-DD"), "" = ingen.
+    # Vises i filhovedet (i stedet for creation_date) og i fillisten.
+    name_date: str = ""
     # iid paa ROD-moderfilen hvis denne entry er en side der er trukket ud som sin
     # egen fil. "" = en rigtig fil. Peger ALDRIG paa et andet barn (se
     # extract_pages), saa grupperingen i sort_order er praecis eet niveau dyb.
@@ -126,6 +129,11 @@ class EditModel:
 
     def __init__(self):
         self.files: list = []          # list[FileEntry]
+        # Rod-filer der er forsvundet fordi ALLE deres sider blev flyttet til en
+        # anden fil (``_detach``), noeglet paa sti. Kun et opslag til
+        # :func:`reset_layout`, saa den kan genskabe filen med samme iid og
+        # metadata; hverken gem eller visning laeser det.
+        self.retired: dict = {}        # path -> FileEntry
 
     # --- lookup -----------------------------------------------------------
     def entry_by_iid(self, iid: str) -> "FileEntry | None":
@@ -273,6 +281,9 @@ class EditModel:
         for f in self.files:
             if any(id(p) in drop for p in f.pages):
                 f.pages = [p for p in f.pages if id(p) not in drop]
+                if not f.pages and f.pages_loaded and not f.origin_iid \
+                        and f.iid != keep_iid:
+                    self.retired.setdefault(f.path, f)
         self.files = [f for f in self.files
                       if f.pages or not f.pages_loaded or f.iid == keep_iid]
 
@@ -330,6 +341,7 @@ class EditModel:
             kind=mother.kind,
             enc_key=mother.enc_key,
             creation_date=mother.creation_date,
+            name_date=mother.name_date,
             size_bytes=mother.size_bytes,
             origin_iid=root_iid,
             source_page_count=mother.source_page_count,
@@ -386,7 +398,7 @@ def kind_for_path(path: str) -> str:
 # is driven by the caller (the app resyncs its views after do/undo/redo). Kept
 # here (next to the mutators) per the plan; importing Command from undo_stack is
 # safe because undo_stack imports nothing from this module.
-from .undo_stack import Command
+from .undo_stack import Command, N_
 
 
 def rotate_page_cmd(model: "EditModel", uid: str, delta: int) -> Command:
@@ -398,7 +410,7 @@ def rotate_page_cmd(model: "EditModel", uid: str, delta: int) -> Command:
     def undo():
         model.rotate_page(uid, -delta)
 
-    return Command("Roter side", do, undo, coalesce_key="rotate:%s" % uid)
+    return Command(N_("Roter side"), do, undo, coalesce_key="rotate:%s" % uid)
 
 
 def delete_page_cmd(model: "EditModel", uid: str) -> Command:
@@ -429,7 +441,7 @@ def delete_page_cmd(model: "EditModel", uid: str) -> Command:
         else:
             model.insert_page(st["fi"], st["pos"], st["page"])
 
-    return Command("Slet side", do, undo)
+    return Command(N_("Slet side"), do, undo)
 
 
 def add_annotation_cmd(model: "EditModel", uid: str, spec: "AnnotationSpec") -> Command:
@@ -439,7 +451,7 @@ def add_annotation_cmd(model: "EditModel", uid: str, spec: "AnnotationSpec") -> 
     def undo():
         model.remove_annotation(uid, spec.uid)
 
-    return Command("Tilføj annotation", do, undo)
+    return Command(N_("Tilføj annotation"), do, undo)
 
 
 def remove_annotation_cmd(model: "EditModel", uid: str, spec: "AnnotationSpec") -> Command:
@@ -449,7 +461,7 @@ def remove_annotation_cmd(model: "EditModel", uid: str, spec: "AnnotationSpec") 
     def undo():
         model.add_annotation(uid, spec)
 
-    return Command("Fjern annotation", do, undo)
+    return Command(N_("Fjern annotation"), do, undo)
 
 
 def add_annotations_batch_cmd(model: "EditModel", items, title: str = "") -> Command:
@@ -468,7 +480,7 @@ def add_annotations_batch_cmd(model: "EditModel", items, title: str = "") -> Com
         for uid, spec in items:
             model.remove_annotation(uid, spec.uid)
 
-    return Command(title or "Tilføj annotationer", do, undo)
+    return Command(title or N_("Tilføj annotationer"), do, undo)
 
 
 def reorder_files_cmd(model: "EditModel", new_order_iids: list) -> Command:
@@ -480,7 +492,33 @@ def reorder_files_cmd(model: "EditModel", new_order_iids: list) -> Command:
     def undo():
         model.reorder_files(old_order)
 
-    return Command("Omordn filer", do, undo)
+    return Command(N_("Omordn filer"), do, undo)
+
+
+def power_sort_cmd(model: "EditModel", new_order_iids: list,
+                   name_dates: "dict | None" = None) -> Command:
+    """Power-sorteringens resultat som EET undo-trin: raekkefoelgen og -- hvis
+    brugeren fandt datoer i filnavnene -- ``FileEntry.name_date`` for hver fil.
+
+    ``name_dates`` er ``{iid: "YYYY-MM-DD" | ""}``; ``None`` roerer ikke datoerne
+    (dialogen blev brugt uden at lede efter dem). En fil der ikke er naevnt,
+    faar sin dato ryddet: den blev ledt efter og ikke fundet."""
+    old_order = [f.iid for f in model.files]
+    old_dates = {f.iid: f.name_date for f in model.files}
+
+    def do():
+        model.reorder_files(list(new_order_iids))
+        if name_dates is not None:
+            for f in model.files:
+                f.name_date = name_dates.get(f.iid, "")
+
+    def undo():
+        model.reorder_files(old_order)
+        for f in model.files:
+            if f.iid in old_dates:
+                f.name_date = old_dates[f.iid]
+
+    return Command(N_("Power-sortering"), do, undo)
 
 
 def insert_pages_cmd(model: "EditModel", file_index: int, position: int, pages: list) -> Command:
@@ -500,7 +538,7 @@ def insert_pages_cmd(model: "EditModel", file_index: int, position: int, pages: 
         for uid in uids:
             model.remove_page(uid)
 
-    return Command("Indsæt side", do, undo)
+    return Command(N_("Indsæt side"), do, undo)
 
 
 # --- Sortering (ren, Tk-fri, headless-testbar) -----------------------------
@@ -508,6 +546,22 @@ SORT_REVERSE = "reverse"
 SORT_DATE = "date"
 SORT_NAME = "name"
 SORT_SIZE = "size"
+SORT_NAME_DATE = "name_date"          # datoen Power-sorteringen fandt i filnavnet
+SORT_PAGES = "pages"
+
+# Noegler hvor en fil kan mangle vaerdien. De tomme staar SIDST i begge
+# retninger -- en fil uden dato skal ikke lede listen naar man vender den.
+_EMPTY_LAST = {SORT_DATE: lambda f: not f.creation_date,
+               SORT_NAME_DATE: lambda f: not f.name_date}
+
+
+def _page_total(f) -> int:
+    """Sidetallet som fillisten viser det (se ``FileDetailsView._pages_text``)."""
+    if f.pages_loaded:
+        return len(f.pages)
+    if f.kind == KIND_IMAGE:
+        return 1
+    return int(f.source_page_count or 0)
 
 
 def _sort_keyfn(key: str):
@@ -516,6 +570,10 @@ def _sort_keyfn(key: str):
         return lambda f: (Path(f.path).name.casefold(),)
     if key == SORT_SIZE:
         return lambda f: (f.size_bytes,)
+    if key == SORT_PAGES:
+        return lambda f: (_page_total(f),)
+    if key == SORT_NAME_DATE:
+        return lambda f: (f.name_date == "", f.name_date)
     # Dato: TOMME datoer sorteres SIDST stigende, saa en ENC_ERROR-fil uden dato
     # ikke laegger sig oeverst i listen.
     return lambda f: (f.creation_date == "", f.creation_date)
@@ -541,6 +599,10 @@ def sort_order(files: list, key: str, reverse: bool = False) -> list:
         roots = sorted(roots, key=_sort_keyfn(key))
         if reverse:
             roots.reverse()
+            if key in _EMPTY_LAST:
+                empty = _EMPTY_LAST[key]
+                roots = ([r for r in roots if not empty(r)]
+                         + [r for r in roots if empty(r)])
     out = []
     for r in roots:
         out.append(r.iid)
@@ -551,20 +613,6 @@ def sort_order(files: list, key: str, reverse: bool = False) -> list:
         seen = set(out)
         out.extend(f.iid for f in files if f.iid not in seen)
     return out
-
-
-def file_blocks(model: "EditModel") -> list:
-    """``model.files`` grupperet som ``[[rod, barn, barn], [rod], ...]``."""
-    live = {f.iid for f in model.files}
-    blocks, index = [], {}
-    for f in model.files:
-        parent = f.origin_iid if (f.origin_iid and f.origin_iid in live) else ""
-        if parent and parent in index:
-            blocks[index[parent]].append(f)
-        else:
-            index[f.iid] = len(blocks)
-            blocks.append([f])
-    return blocks
 
 
 # --- Pil-planlaegger -------------------------------------------------------
@@ -663,7 +711,7 @@ def structural_cmd(model: "EditModel", label_key: str, mutate) -> Command:
 
 def move_pages_cmd(model: "EditModel", uids: list, dst_iid: str, position: int) -> Command:
     uids = list(uids)
-    return structural_cmd(model, "Flyt side",
+    return structural_cmd(model, N_("Flyt side"),
                           lambda: model.move_pages(uids, dst_iid, position))
 
 
@@ -673,7 +721,7 @@ def extract_pages_cmd(model: "EditModel", uids: list, at_index=None) -> Command:
     # peger paa det blive foraeldreloese efter en undo/redo-runde.
     new_iid = uuid.uuid4().hex
     return structural_cmd(
-        model, "Traek side ud",
+        model, N_("Traek side ud"),
         lambda: model.extract_pages(uids, at_index=at_index, new_iid=new_iid))
 
 
@@ -696,7 +744,7 @@ def delete_pages_cmd(model: "EditModel", uids: list) -> Command:
             model.remove_page(uid)
         model.files = [f for f in model.files if f.pages or not f.pages_loaded]
 
-    return structural_cmd(model, "Slet sider", mutate)
+    return structural_cmd(model, N_("Slet sider"), mutate)
 
 
 def rotate_pages_cmd(model: "EditModel", uids: list, delta: int) -> Command:
@@ -711,7 +759,7 @@ def rotate_pages_cmd(model: "EditModel", uids: list, delta: int) -> Command:
         for uid in uids:
             model.rotate_page(uid, -delta)
 
-    return Command("Roter side", do, undo,
+    return Command(N_("Roter side"), do, undo,
                    coalesce_key="rotate:" + "|".join(sorted(uids)))
 
 
@@ -732,27 +780,232 @@ def set_pages_crop_cmd(model: "EditModel", items) -> Command:
         for uid, _c in items:
             model.set_page_crop(uid, old.get(uid))
 
-    label = "Beskaer side" if any(c for _u, c in items) else "Fjern beskaering"
+    label = (N_("Beskaer side") if any(c for _u, c in items)
+             else N_("Fjern beskaering"))
     return Command(label, do, undo)
 
 
-def sort_files_cmd(model: "EditModel", key: str, reverse: bool = False) -> Command:
+def sort_order_within(files: list, key: str, reverse: bool, iids) -> list:
+    """Sorter KUN de valgte filer -- i de pladser de allerede staar paa.
+
+    ``(A) B (C) (D) E`` sorteret faldende giver ``(A) B (D) (C) E``: de uvalgte
+    rokeres ikke, og de valgte bytter kun indbyrdes. Klaebende boern foelger
+    deres moder som ved almindelig sortering.
+    """
+    blocks, chosen = _blocks_of(files, set(iids))
+    picked = [b for b, c in zip(blocks, chosen) if c]
+    if key == SORT_REVERSE:
+        picked.reverse()
+    else:
+        keyfn = _sort_keyfn(key)
+        picked.sort(key=lambda b: keyfn(b[0]), reverse=reverse)
+    it = iter(picked)
+    blocks = [next(it) if c else b for b, c in zip(blocks, chosen)]
+    return [f.iid for b in blocks for f in b]
+
+
+def sort_files_cmd(model: "EditModel", key: str, reverse: bool = False,
+                   only_iids=None) -> Command:
+    """``only_iids`` (mindst to filer): sorter kun dem, paa deres egne pladser."""
+    if only_iids:
+        return reorder_files_cmd(
+            model, sort_order_within(model.files, key, reverse, only_iids))
     return reorder_files_cmd(model, sort_order(model.files, key, reverse))
+
+
+def _home_paths(model: "EditModel") -> set:
+    """Stierne paa de filer brugeren har tilfoejet -- ogsaa dem der er toemt.
+
+    En side hvis ``src_path`` IKKE er iblandt dem, er en genereret side fra
+    "Indsaet side"; den har intet hjem at vende tilbage til."""
+    return {f.path for f in model.files} | set(model.retired)
+
+
+def pages_moved_between_files(model: "EditModel") -> bool:
+    """Er der sider der ikke laengere ligger i den fil de kom fra?
+
+    Power-sortering sorterer HELE filer efter filens egne data (navn, dato);
+    en fil der har faaet sider fra en anden, eller mistet dem til en udtrukket
+    fil, er ikke laengere den fil datoen beskriver. Sider flyttet INDEN FOR
+    samme fil, og indsatte sider, taeller ikke."""
+    homes = _home_paths(model)
+    for f in model.files:
+        if f.origin_iid:
+            return True
+        for p in f.pages:
+            if p.src_path != f.path and p.src_path in homes:
+                return True
+    return False
+
+
+def _reset_layout(model: "EditModel") -> None:
+    homes = _home_paths(model)
+    # Hjemmet for hver sti: den foerste rod med stien. Findes ingen (alle dens
+    # sider er flyttet, saa filen forsvandt), genbruges den udtrukne fil med
+    # samme sti, ellers den pensionerede post -- begge har moderens metadata.
+    home: dict = {}
+    for f in model.files:
+        if not f.origin_iid:
+            home.setdefault(f.path, f)
+    order = list(model.files)
+    for f in order:
+        if f.origin_iid and f.path not in home:
+            f.origin_iid = ""
+            home[f.path] = f
+    for path, f in model.retired.items():
+        if path not in home:
+            # Dens gamle sideliste kan vaere foraeldet (en undo har givet den
+            # siderne tilbage, og filen er siden fjernet); kun sider der
+            # faktisk ligger i modellen nu, maa komme hjem.
+            f.pages = []
+            home[path] = f
+            order.append(f)
+
+    def target(host, p):
+        if p.src_path in homes:
+            # En rod beholder sine egne sider, ogsaa naar samme fil er tilfoejet
+            # to gange; alt andet gaar til stiens hjem.
+            if host.path == p.src_path and not host.origin_iid:
+                return host
+            return home[p.src_path]
+        # Indsat side: bliver hos sin vaert -- eller dens hjem, hvis vaerten
+        # er en udtrukket fil der nu nedlaegges.
+        return host if not host.origin_iid else home.get(host.path, host)
+
+    incoming: dict = {}
+    for host in order:
+        anchor = -1
+        for seq, p in enumerate(host.pages):
+            t = target(host, p)
+            if p.src_path == t.path:
+                anchor = p.src_index
+                key = (p.src_index, 0, seq)
+            else:
+                key = (anchor, 1, seq)
+            incoming.setdefault(id(t), (t, []))[1].append((key, host is t, p))
+
+    for f in order:
+        got = incoming.get(id(f), (f, []))[1]
+        if all(own for _k, own, _p in got) and len(got) == len(f.pages):
+            continue                                   # uroert: behold raekkefoelgen
+        got.sort(key=lambda t: t[0])
+        f.pages = [p for _k, _own, p in got]
+        if f.pages:
+            f.pages_loaded = True
+    keep = set(id(f) for f in home.values())
+    model.files = [f for f in order
+                   if (id(f) in keep or not f.origin_iid)
+                   and (f.pages or not f.pages_loaded)]
+
+
+def reset_layout_cmd(model: "EditModel") -> Command:
+    """Foer hver side tilbage til den fil den kom fra ("Nulstil visning").
+
+    Udtrukne filer nedlaegges, en toemt fil genopstaar (paa den udtrukne fils
+    plads, ellers sidst i listen), og en fil der faar sider hjem,
+    sorteres efter kildesidenummer. Rotation, beskaering og annotationer
+    foelger siden -- det er de samme ``PageEdit``-objekter. Slettede sider
+    forbliver slettede, og indsatte sider bliver i den fil de staar i."""
+    return structural_cmd(model, N_("Nulstil visning"), lambda: _reset_layout(model))
+
+
+def files_touched(model: "EditModel", uids) -> list:
+    """Iid'erne paa de filer markeringen har sider i, i modelraekkefoelge."""
+    want = set(uids)
+    return [f.iid for f in model.files if any(p.uid in want for p in f.pages)]
+
+
+def _unit_blocks(model: "EditModel", want: set):
+    """``model.files`` som flytbare blokke + hvilke der er valgt.
+
+    Et barn klaeber kun til sin moder naar det staar LIGE efter hendes blok --
+    et barn der er flyttet vaek, er sin egen blok og skal ikke hives tilbage.
+    Et VALGT barn hvis moder ikke er valgt, rives ogsaa loes: brugeren har bedt
+    om at flytte netop det. Uvalgte boern foelger en valgt moder.
+    """
+    return _blocks_of(model.files, want)
+
+
+def _blocks_of(files: list, want: set):
+    """Se :func:`_unit_blocks` -- paa en vilkaarlig filliste."""
+    live = {f.iid for f in files}
+    blocks = []
+    for f in files:
+        parent = f.origin_iid if f.origin_iid in live else ""
+        glue = (blocks and parent and blocks[-1][0].iid == parent
+                and not (f.iid in want and parent not in want))
+        if glue:
+            blocks[-1].append(f)
+        else:
+            blocks.append([f])
+    return blocks, [b[0].iid in want for b in blocks]
+
+
+def _step_files(model: "EditModel", want: set, direction: int) -> None:
+    """Hver valgt blok bytter med den UVALGTE nabo i retningen. Er naboen selv
+    valgt (eller er der ingen), bliver blokken staaende -- saa flere valgte filer
+    samler sig ved kanten i uaendret raekkefoelge i stedet for at bytte indbyrdes."""
+    blocks, chosen = _unit_blocks(model, want)
+    step = 1 if direction > 0 else -1
+    order = range(len(blocks) - 1, -1, -1) if step > 0 else range(len(blocks))
+    for i in order:
+        j = i + step
+        if chosen[i] and 0 <= j < len(blocks) and not chosen[j]:
+            blocks[i], blocks[j] = blocks[j], blocks[i]
+            chosen[i], chosen[j] = chosen[j], chosen[i]
+    model.files = [f for b in blocks for f in b]
+
+
+def _edge_files(model: "EditModel", want: set, to_end: bool) -> None:
+    """De valgte blokke samlet til top/bund; begge grupper beholder raekkefoelgen."""
+    blocks, chosen = _unit_blocks(model, want)
+    picked = [b for b, c in zip(blocks, chosen) if c]
+    rest = [b for b, c in zip(blocks, chosen) if not c]
+    model.files = [f for b in (rest + picked if to_end else picked + rest) for f in b]
 
 
 def move_files_cmd(model: "EditModel", iids: list, direction: int) -> Command:
     """Flyt hele filer een plads. Klaebende boern foelger altid deres moder."""
     want = set(iids)
+    return structural_cmd(model, N_("Flyt fil"), lambda: _step_files(model, want, direction))
+
+
+def move_files_edge_cmd(model: "EditModel", iids: list, to_end: bool) -> Command:
+    """Flyt de valgte filer (med boern) samlet til top/bund."""
+    want = set(iids)
+    return structural_cmd(model, N_("Flyt fil"), lambda: _edge_files(model, want, to_end))
+
+
+def move_across_files_cmd(model: "EditModel", uids: list, direction: int,
+                          edge: bool = False) -> Command:
+    """Pile-tryk paa en markering der spaender over FLERE filer.
+
+    Filerne forbliver hver for sig -- intet flettes sammen:
+    - en HELT markeret fil flyttes som fil (een plads, eller til kanten);
+    - er kun NOGLE af en fils sider markeret, rives de ud som deres egen fil
+      lige over (op) / under (ned) moderen. Det ER deres ene skridt; ved
+      ``edge`` gaar de med de andre helt til kanten.
+    """
+    want_pages = set(uids)
+    down = direction > 0
 
     def mutate():
-        blocks = file_blocks(model)
-        hits = [i for i, b in enumerate(blocks) if b[0].iid in want]
-        if not hits:
-            return
-        for i in sorted(hits, reverse=direction > 0):
-            j = i + (1 if direction > 0 else -1)
-            if 0 <= j < len(blocks):
-                blocks[i], blocks[j] = blocks[j], blocks[i]
-        model.files = [f for b in blocks for f in b]
+        units, extracted = [], set()
+        for f in list(model.files):
+            sel = [p.uid for p in f.pages if p.uid in want_pages]
+            if not sel:
+                continue
+            if len(sel) == len(f.pages):
+                units.append(f.iid)
+                continue
+            at = model.index_of_iid(f.iid) + (1 if down else 0)
+            new = model.extract_pages(sel, at_index=at)
+            if new is not None:
+                units.append(new.iid)
+                extracted.add(new.iid)
+        if edge:
+            _edge_files(model, set(units), down)
+        else:
+            _step_files(model, set(units) - extracted, direction)
 
-    return structural_cmd(model, "Flyt fil", mutate)
+    return structural_cmd(model, N_("Flyt side"), mutate)

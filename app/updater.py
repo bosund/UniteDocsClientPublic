@@ -7,8 +7,11 @@ stdlib'ens ``urllib.request`` - en ny afhaengighed ville kraeve en post i
 
 Serverkontrakten (to offentlige endpoints, ingen login):
 
-``GET /api/unitedocs/version?current=<version>``
-    JSON med ``version``, ``file_name``, ``size``, ``sha256``, ``release_notes``,
+``GET /api/unitedocs/version?current=<version>&install=<uuid>``
+    ``install`` er et tilfaeldigt, anonymt installations-id (se
+    :func:`get_install_id`), som serveren bruger som besoegs-id i Umami, saa
+    maskiner bag samme NAT ikke taeller som een. Serveren ignorerer et
+    ugyldigt id og svarer det samme med og uden. JSON med ``version``, ``file_name``, ``size``, ``sha256``, ``release_notes``,
     ``download_url``, ``info_url``. Ligger der ingen installer, svares ``404``
     med ``{"available": false}`` - det er et normalt svar, ikke en fejl.
 
@@ -40,6 +43,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -170,7 +174,65 @@ def _as_int(value, fallback=0) -> int:
         return fallback
 
 
-def check(current_version, timeout=_NET_TIMEOUT, url=VERSION_URL):
+# ---------------------------------------------------------------------------
+# Anonymt installations-id
+# ---------------------------------------------------------------------------
+
+_INSTALL_ID_SECTION = "Updates"
+_INSTALL_ID_OPTION = "install_id"
+
+
+def _valid_install_id(value):
+    """Kanonisk UUID-streng, eller ``None`` hvis ``value`` ikke er et UUID."""
+    text = str(value or "").strip().lower()
+    try:
+        parsed = uuid.UUID(text)
+    except (ValueError, TypeError, AttributeError):
+        return None
+    # uuid.UUID accepterer ogsaa {...}, urn: og uden bindestreger. Vi gemmer
+    # kun den kanoniske form, saa alt andet regnes for ugyldigt og erstattes.
+    return str(parsed) if str(parsed) == text else None
+
+
+def get_install_id(config):
+    """Hent installations-id'et fra ``[Updates] install_id`` - opret det ved behov.
+
+    Id'et er ``uuid4()`` og intet andet: det maa ikke afledes af maskinnavn,
+    brugernavn, MAC-adresse, SID eller noget andet der kan pege paa en person.
+    ``%APPDATA%`` er roaming, saa paa domaene-pc'er foelger id'et brugeren
+    mellem maskiner. Det er accepteret - vi taeller brugere snarere end maskiner.
+
+    Kaster aldrig. Kan config ikke laeses eller skrives, returneres ``None``,
+    og tjekket sendes saa uden ``install``.
+    """
+    try:
+        existing = _valid_install_id(
+            config.get(_INSTALL_ID_SECTION, _INSTALL_ID_OPTION, fallback=""))
+    except Exception as exc:
+        logger.debug("Kunne ikke laese install_id: %s", exc)
+        return None
+    if existing:
+        return existing
+
+    new_id = str(uuid.uuid4())
+    try:
+        old = config.get(_INSTALL_ID_SECTION, _INSTALL_ID_OPTION, fallback="")
+        config.set(_INSTALL_ID_SECTION, _INSTALL_ID_OPTION, new_id)
+        try:
+            config.save()
+        except Exception:
+            # Et id der kun lever i hukommelsen, ville blive et nyt ved naeste
+            # opstart og taelle samme installation to gange. Saa hellere intet.
+            config.set(_INSTALL_ID_SECTION, _INSTALL_ID_OPTION, old or "")
+            raise
+    except Exception as exc:
+        logger.debug("Kunne ikke gemme install_id: %s", exc)
+        return None
+    return new_id
+
+
+def check(current_version, timeout=_NET_TIMEOUT, url=VERSION_URL,
+          install_id=None):
     """Spoerg serveren om nyeste version.
 
     Returnerer ``None`` naar der intet er at hente (``404`` /
@@ -180,9 +242,16 @@ def check(current_version, timeout=_NET_TIMEOUT, url=VERSION_URL):
     ``?current=`` mangler eller ikke kunne laeses, saa det bruges ikke som
     facit.
 
+    ``install_id`` sendes med som ``install``, naar det er et gyldigt UUID;
+    ellers sendes tjekket uden - id'et maa aldrig faa kaldet til at fejle.
+
     Kaster :class:`UpdateError` ved netvaerks- eller formatfejl.
     """
-    query = urllib.parse.urlencode({"current": current_version or ""})
+    params = {"current": current_version or ""}
+    install = _valid_install_id(install_id)
+    if install:
+        params["install"] = install
+    query = urllib.parse.urlencode(params)
     req = urllib.request.Request(
         "%s?%s" % (url, query),
         headers={"User-Agent": _user_agent(current_version),

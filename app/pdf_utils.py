@@ -305,3 +305,45 @@ def get_pdf_metadata(path: str, passwords: list[str]) -> dict:
 
     return {"page_count": page_count, "enc_status": enc,
             "creation_date": creation_date, "size_bytes": size}
+
+
+_PDF_DATETIME_RE = re.compile(r"D:(\d{4})(\d{2})(\d{2})(\d{2})?(\d{2})?")
+
+
+def _fs_created(path: str) -> str:
+    """Filsystemets oprettelsestid som ``"YYYY-MM-DD HH:MM"``, "" hvis ukendt.
+
+    Paa Windows er ``st_ctime`` oprettelsestiden (paa POSIX er det
+    aendringstiden for inoden -- appen koerer kun paa Windows)."""
+    try:
+        st = os.stat(path)
+    except (OSError, FileNotFoundError):
+        return ""
+    ts = getattr(st, "st_birthtime", None) or st.st_ctime
+    return datetime.datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M")
+
+
+def get_file_dates(path: str, passwords: list[str]) -> dict:
+    """Datoerne Power-sorteringen viser: ``{"created": ..., "pdf_date": ...}``.
+
+    Begge er ``"YYYY-MM-DD HH:MM"`` eller "". ``pdf_date`` er KUN dokumentets
+    egen ``/CreationDate`` (``/ModDate`` som reserve) -- modsat
+    :func:`get_pdf_metadata` falder den ikke tilbage til filens tidsstempel, for
+    saa ville kolonnen blot gentage "Oprettet". Kald under ``PDF_LOCK``."""
+    out = {"created": _fs_created(path), "pdf_date": ""}
+    if Path(path).suffix.lower() != ".pdf":
+        return out
+    doc = None
+    try:
+        doc = open_with_passwords(path, passwords)
+        meta = (doc.metadata or {}) if doc else {}
+        for key in ("creationDate", "modDate"):
+            if (m := _PDF_DATETIME_RE.match(str(meta.get(key) or ""))):
+                out["pdf_date"] = "%s-%s-%s %s:%s" % (
+                    m[1], m[2], m[3], m[4] or "00", m[5] or "00")
+                break
+    except Exception as e:
+        logger.info("Kunne ikke laese PDF-dato for %s: %s", Path(path).name, e)
+    finally:
+        _safe_close(doc)
+    return out

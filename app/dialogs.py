@@ -400,14 +400,21 @@ class SortPanel(QWidget):
         fl.setSpacing(0)
         lay.addWidget(frame)
 
-        for key, label, is_directional in rows:
-            btn = QPushButton(_(label), frame)
+        for row in rows:
+            if row is None:
+                line = theme.hairline("horizontal", frame)
+                fl.addSpacing(theme.SPACE["xs"])
+                fl.addWidget(line)
+                fl.addSpacing(theme.SPACE["xs"])
+                continue
+            key, label, is_directional = row
+            btn = QPushButton(label, frame)        # allerede oversat af kalderen
             btn.setObjectName("CmdButton")
             btn.setFlat(True)
             btn.setCursor(Qt.CursorShape.PointingHandCursor)
             btn.setStyleSheet("text-align: left; padding: 6px 10px;")
             if is_directional:
-                btn.setText("%s   %s" % (_(label), "▼" if directions.get(key) else "▲"))
+                btn.setText("%s   %s" % (label, "▼" if directions.get(key) else "▲"))
             btn.clicked.connect(lambda _c=False, k=key: self.chosen.emit(k))
             fl.addWidget(btn)
 

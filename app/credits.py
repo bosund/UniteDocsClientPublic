@@ -21,10 +21,10 @@ CREDITS = (
     Library("PyMuPDF", "1.28.2", "AGPL-3.0", "https://pymupdf.readthedocs.io/"),
     Library("pymupdf4llm", "0.3.4", "AGPL-3.0", "https://pymupdf.readthedocs.io/en/latest/pymupdf4llm/"),
     Library("EbookLib", "0.20", "AGPL-3.0", "https://github.com/aerkalov/ebooklib"),
-    Library("lxml", "6.0.2", "BSD-3-Clause", "https://lxml.de/"),
+    Library("lxml", "6.1.3", "BSD-3-Clause", "https://lxml.de/"),
     Library("Markdown", "3.10.3", "BSD-3-Clause", "https://python-markdown.github.io/"),
     Library("tabulate", "0.10.0", "MIT", "https://github.com/astanin/python-tabulate"),
-    Library("Pillow", "12.2.0", "MIT-CMU", "https://python-pillow.org/"),
+    Library("Pillow", "12.3.0", "MIT-CMU", "https://python-pillow.org/"),
     Library("Tesseract OCR (tessdata)", "", "Apache-2.0", "https://github.com/tesseract-ocr/tessdata_fast"),
     Library("pycryptodome", "3.23.0", "BSD-2-Clause / Public Domain", "https://www.pycryptodome.org/"),
     # --- Automatisk anonymisering -------------------------------------
@@ -106,8 +106,8 @@ CREDITS = (
     # Qt linkes DYNAMISK (Qt-DLL'erne ligger ved siden af exe'en), hvilket er
     # praecis det LGPL-3.0 kraever for at maatte distribuere en lukket/AGPL-app
     # ovenpaa. Bytter man til en statisk Qt-build, bortfalder den ret.
-    Library("Qt for Python (PySide6)", "6.9.1", "LGPL-3.0", "https://doc.qt.io/qtforpython/"),
-    Library("Qt", "6.9.1", "LGPL-3.0", "https://www.qt.io/"),
+    Library("Qt for Python (PySide6)", "6.11.2", "LGPL-3.0", "https://doc.qt.io/qtforpython/"),
+    Library("Qt", "6.11.2", "LGPL-3.0", "https://www.qt.io/"),
     Library("Python", "", "PSF", "https://www.python.org/"),
 )
 

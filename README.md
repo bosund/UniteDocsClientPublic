@@ -41,6 +41,8 @@ It's a fast, lightweight **Windows desktop app** that does everything locally on
 
 Unlike iLovePDF, Smallpdf, Adobe online and dozens of "free PDF combiner" websites, **Unite Docs runs 100% offline.** Your contracts, payslips, medical records and legal documents are processed entirely on your own hardware. Nothing is uploaded, cached on a server, or logged anywhere but your own machine. **Privacy by design.**
 
+The only thing that ever goes online is the weekly update check (and *Check for updates*). It sends the app version and an anonymous installation ID — a random UUID created on first use, not derived from your computer or user name — so we can count how many installations are in use. No file names, document contents or personal data are sent. The automatic check can be turned off in Settings → Updates.
+
 ---
 
 ## ✨ Features at a glance
