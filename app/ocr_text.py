@@ -75,6 +75,10 @@ MIN_TOKEN_LEN = 3
 #: kasseres — se :func:`_drop_outliers`.
 MAX_LINE_GAP = 3.0
 
+#: Et mellemrum bredere end saa mange tegnbredder mellem to ord paa samme linje
+#: er et **spaltebrud**, ikke et ordmellemrum. Se :func:`_column_gap`.
+COLUMN_GAP_CHARS = 3.0
+
 #: Et *velformet* ord: Stort-forbogstav, helt smaat, eller HELT STORT. Netop
 #: den form roteret tekst ikke har — se :func:`_score`.
 _WELL_FORMED = re.compile(
@@ -376,18 +380,17 @@ def words_to_text(words):
     parts = []
     offsets = []
     pos = 0
-    prev_block = prev_line = None
+    prev = None
 
     for i, w in enumerate(words):
         text = w[4]
         if not text:
             continue
-        block, line = w[5], w[6]
-        if prev_block is None:
+        if prev is None:
             sep = ""
-        elif block != prev_block:
+        elif w[5] != prev[5]:
             sep = "\n\n"
-        elif line != prev_line:
+        elif w[6] != prev[6] or _column_gap(prev, w):
             sep = "\n"
         else:
             sep = " "
@@ -397,34 +400,218 @@ def words_to_text(words):
         parts.append(text)
         offsets.append((pos, pos + len(text), i))
         pos += len(text)
-        prev_block, prev_line = block, line
+        prev = w
 
     return "".join(parts), offsets
 
 
-def rects_for_span(words, offsets, start: int, end: int) -> list:
+def _column_gap(a, b) -> bool:
+    """Er der et spaltebrud mellem ord ``a`` og det efterfoelgende ord ``b``?
+
+    Et tekstlag kan skrive to spalter som **én** linje. Visma-loensedler goer
+    det: ``Mette Kudsk Madsen`` til venstre og ``Fratrædelsesdato :`` til
+    hoejre deler ``(block, line)``, med 174 pt luft imellem. Med ét mellemrum
+    imellem saa sprogmodellen ``Mette Kudsk Madsen Fratrædelsesdato`` som ét
+    navn, adressemoensteret tog ``N`` fra ``Normtid`` som husnummerbogstav, og
+    ``rects_for_span`` lagde én bjaelke hen over hele mellemrummet og etiketten.
+
+    Afstanden maales langs linjens retning (et ord kan staa lodret i A-space paa
+    en roteret side) og sammenlignes med ordenes egen tegnbredde, saa reglen er
+    uafhaengig af skriftstoerrelse. Et almindeligt mellemrum er omkring én
+    tegnbredde; selv udfyldt ligestillet tekst naar ikke tre.
+    """
+    dx = max(b[0] - a[2], a[0] - b[2])
+    dy = max(b[1] - a[3], a[1] - b[3])
+    if dx >= dy:
+        gap, ext = dx, (a[2] - a[0], b[2] - b[0])
+    else:
+        gap, ext = dy, (a[3] - a[1], b[3] - b[1])
+    if gap <= 0:
+        return False
+    char = (ext[0] / max(1, len(a[4])) + ext[1] / max(1, len(b[4]))) / 2
+    return char > 0 and gap > COLUMN_GAP_CHARS * char
+
+
+def rects_for_span(words, offsets, start: int, end: int, *,
+                   clip: bool = False) -> list:
     """Rects i A-space for tegnspennet ``[start, end)``.
 
     Ét rect pr. ``(block, line)`` spennet beroerer — altsaa ét ved et normalt
-    hit og N naar hittet braekker over linjer.
+    hit og N naar hittet braekker over linjer. Et spaltebrud inde i en linje
+    (:func:`_column_gap`) deler ogsaa rectet, saa bjaelken aldrig spaender over
+    mellemrummet mellem to spalter og det der staar i den anden.
+
+    ``clip=True`` klipper hvert rect fri af nabo-ordene
+    (:func:`_clip_to_neighbours`). Det maa **kun** ske naar teksten selv er
+    det der vises — se :func:`text_layer_visible`. Er siden en scanning, er
+    det billedets pixels maskeringen skal blanke, og de ligger ogsaa uden for
+    et klippet baand.
     """
     hits = [idx for (s, e, idx) in offsets if s < end and e > start]
     if not hits:
         return []
 
-    lines = OrderedDict()
+    groups = []
+    prev = None
     for idx in hits:
         w = words[idx]
-        lines.setdefault((w[5], w[6]), []).append(w)
+        if (prev is None or (w[5], w[6]) != (prev[5], prev[6])
+                or _column_gap(prev, w)):
+            groups.append([])
+        groups[-1].append(w)
+        prev = w
 
-    rects = []
-    for group in lines.values():
-        rects.append((min(w[0] for w in group), min(w[1] for w in group),
-                      max(w[2] for w in group), max(w[3] for w in group)))
+    raw = [(min(w[0] for w in g), min(w[1] for w in g),
+            max(w[2] for w in g), max(w[3] for w in g)) for g in groups]
+    # Udhopperne frasorteres paa de UKLIPPEDE rects: klippet kan goere et rect
+    # meget lavt, og saa ville medianhoejden -- og dermed graensen -- skrumpe
+    # til den kasserede rigtige linjer af fundet.
+    kept = _drop_outliers(raw)
+    out = []
+    for r, g in zip(raw, groups):
+        if r not in kept:
+            continue
+        out.append(_clip_to_neighbours(r, g, words, pad=SPAN_PAD) if clip
+                   else (r[0] - SPAN_PAD, r[1] - SPAN_PAD,
+                         r[2] + SPAN_PAD, r[3] + SPAN_PAD))
+    return out
 
-    rects = _drop_outliers(rects)
-    pad = 1.0
-    return [(r[0] - pad, r[1] - pad, r[2] + pad, r[3] + pad) for r in rects]
+
+#: Luft om et fund. Den sikrer at ingen glyfkant stikker ud af bjaelken, men
+#: maa aldrig skubbe den ind over naboens linje — se :func:`_clip_to_neighbours`.
+SPAN_PAD = 1.0
+
+
+def text_layer_visible(page) -> bool:
+    """Er sidens tekst det der **vises**, eller ligger den skjult over et billede?
+
+    En scanning med et OCR-lag (fra scanneren eller et OCR-program) har tekst
+    der er skjult (``3 Tr``) eller helt gennemsigtig; det synlige er billedet.
+    Dér er det pixels maskeringen skal blanke, og en bjaelke klippet til et
+    smalt baand ville lade toppen og bunden af de scannede bogstaver staa
+    laesbart tilbage. Kun naar teksten selv er synlig, er klipningen sikker.
+
+    ``get_texttrace()``: ``type`` 3 er skjult tekst, ``opacity`` 0 usynlig.
+    Ingen tekst giver ``False`` -- saa klippes der ikke, som foer.
+    """
+    try:
+        spans = page.get_texttrace()
+    except Exception as e:
+        logger.debug("get_texttrace fejlede: %s", e)
+        return False
+    vis = hid = 0
+    for s in spans:
+        n = len(s.get("chars") or ())
+        if s.get("type") == 3 or (s.get("opacity") or 0.0) <= 0.0:
+            hid += n
+        else:
+            vis += n
+    return vis > hid
+
+
+def clip_to_page_words(rects, words, pad: float = 0.0) -> list:
+    """Klip maskerings-rects saa de ikke roerer ord de ikke er lavet til.
+
+    Til rects der **ikke** kommer fra :func:`rects_for_span` — ``search_for``-
+    traef og fremviserens tekstmarkering — og som derfor ikke ved hvilke ord de
+    daekker. Et ord hoerer til rectet naar dets midtpunkt ligger i det, eller
+    naar rectets midtpunkt ligger i ordet (et traef midt i et ord, som ``25`` i
+    ``25-02-1997``). Alle andre ord er naboer, se :func:`_clip_to_neighbours`.
+
+    ``words`` er sidens ord i A-space, samme rum som ``rects``. Kald den kun
+    naar :func:`text_layer_visible` er sand for siden.
+    """
+    out = []
+    for r in rects:
+        r = tuple(float(v) for v in r)
+        rcx, rcy = (r[0] + r[2]) / 2, (r[1] + r[3]) / 2
+        group = [w for w in words if w[4] and (
+            (r[0] <= (w[0] + w[2]) / 2 <= r[2] and r[1] <= (w[1] + w[3]) / 2 <= r[3])
+            or (w[0] <= rcx <= w[2] and w[1] <= rcy <= w[3]))]
+        out.append(_clip_to_neighbours(r, group, words, pad=pad) if group
+                   else r)
+    return out
+
+
+#: Afstand der holdes til et naboords boks. ``apply_redactions()`` sletter et
+#: tegn ved *ethvert* overlap, ogsaa en delt kant.
+_NEIGHBOUR_EPS = 0.05
+
+
+def _clip_to_neighbours(r, group, words, pad: float):
+    """``r`` udvidet med ``pad``, men aldrig ind i et ord der ikke er valgt.
+
+    PyMuPDF's ordbokse har skriftens fulde ascender og descender med og er
+    derfor **hoejere end linjeafstanden**. Maalt paa en Visma-loenseddel:
+    boksene er 12,5 pt hoeje, linjerne ligger 8,4 pt fra hinanden. En bjaelke
+    om ``Thorsvej 25`` gik derfor 4 pt ind i baade linjen over og under, og
+    ``apply_redactions()`` slettede ``Mette`` og ``8500 Grenaa`` med -- tekst
+    der ikke var valgt, og som er uigenkaldeligt vaek i den gemte fil.
+
+    MuPDF sletter et tegn hvis dets boks har **ethvert** overlap med
+    maskeringen (PyMuPDF-dokumentationen, ``apply_redactions``). De boksene
+    MuPDF bruger dér, overlapper ogsaa hinanden fra linje til linje (maalt:
+    ``Mette`` 129,6–139,7, ``Thorsvej`` 138,0–148,1), saa et klip paa midten af
+    overlappet er ikke nok -- det blev proevet og slettede stadig begge naboer.
+    Bjaelken stoppes derfor ved naboordets **kant**. Det der er tilbage, er
+    baandet midt i linjen som kun linjen selv daekker; det rammer linjens egne
+    tegn og ingen andres. Samme regel gaelder vandret mod ord paa samme linje.
+
+    **Hvilken akse** der klippes paa, afgoeres af naboens placering og ikke
+    af et gaet paa linjens retning. Ligger naboens midtpunkt over eller under
+    rectet (inden for dets bredde), er det linjen over/under: klip y. Ligger
+    det til siden (inden for dets hoejde), er det et ord paa samme linje:
+    klip x. Ligger det skraat, klippes der hvor naboen rager *mindst* ind,
+    regnet mod den mindste af de to udstraekninger.
+
+    Et gaet paa retningen ud fra ordets form fejlede for et enkelt smalt tegn
+    (``1`` alene paa en linje er hoejere end bredt og blev taget for lodret
+    tekst), og saa blev bjaelken klippet til en 0,5 pt smal stribe i fuld
+    hoejde -- der stadig slettede begge naboer. Et overlap regnet mod rectets
+    egen bredde fejlede den anden vej: over ``Færgehavnsvej`` staar
+    ``Stena Line A/S`` i korte ord, og ``Line`` daekkede en mindre andel af
+    bredden end af hoejden. Reglen her klarer begge, og lodret tekst paa en
+    roteret side, uden at skulle vide hvilken vej linjen loeber.
+    """
+    lo_x, lo_y, hi_x, hi_y = r[0] - pad, r[1] - pad, r[2] + pad, r[3] + pad
+    members = {id(w) for w in group}
+    eps = _NEIGHBOUR_EPS
+    for w in words:
+        if id(w) in members or not w[4]:
+            continue
+        if not (w[0] < hi_x and w[2] > lo_x and w[1] < hi_y and w[3] > lo_y):
+            continue                       # roerer ikke rectet
+        cx, cy = (w[0] + w[2]) / 2, (w[1] + w[3]) / 2
+        in_x = r[0] <= cx <= r[2]
+        in_y = r[1] <= cy <= r[3]
+        if in_x != in_y:
+            clip_y = in_x                  # over/under -> y; til siden -> x
+        else:                              # skraat: mindste andel vinder
+            ox = ((min(w[2], hi_x) - max(w[0], lo_x))
+                  / max(min(r[2] - r[0], w[2] - w[0]), 1e-6))
+            oy = ((min(w[3], hi_y) - max(w[1], lo_y))
+                  / max(min(r[3] - r[1], w[3] - w[1]), 1e-6))
+            clip_y = oy <= ox
+        if clip_y:
+            if cy < (r[1] + r[3]) / 2:
+                lo_y = max(lo_y, w[3] + eps)
+            else:
+                hi_y = min(hi_y, w[1] - eps)
+        else:                              # klip x
+            if cx < (r[0] + r[2]) / 2:
+                lo_x = max(lo_x, w[2] + eps)
+            else:
+                hi_x = min(hi_x, w[0] - eps)
+    if lo_y >= hi_y or lo_x >= hi_x:
+        # Linjerne ligger saa taet at intet baand er linjens eget. Et smalt
+        # rect midt i er det bedste bud; det kan stadig strejfe en nabo.
+        logger.info("Intet frit baand om fund; bruger midterlinjen")
+        my, mx = (r[1] + r[3]) / 2, (r[0] + r[2]) / 2
+        if lo_y >= hi_y:
+            lo_y, hi_y = my - 0.25, my + 0.25
+        if lo_x >= hi_x:
+            lo_x, hi_x = mx - 0.25, mx + 0.25
+    return (lo_x, lo_y, hi_x, hi_y)
 
 
 def _drop_outliers(rects: list) -> list:

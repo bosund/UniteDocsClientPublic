@@ -18,7 +18,10 @@ Vigtige designvalg:
 - Tabeller findes med strategien "lines" (se ``TABLE_STRATEGY``), og den
   kolonneoverskrift pymupdf4llm sluger, sættes tilbage (se
   ``_restore_table_headers``).
-- HTML-koder fra tabeludtræk (`<br>`) fjernes (se ``_clean_extracted_markdown``).
+- En side sat i fastbreddeskrift gengives som et tegngitter i en kodeblok i
+  stedet for pymupdf4llm's output (se ``_monospace_grid``).
+- HTML-koder fra tabeludtræk (`<br>`) fjernes (se ``_clean_extracted_markdown``),
+  og tabeller uden indhold droppes (se ``_drop_empty_tables``).
 - Billeder udelades bevidst (``EXPORT_INCLUDE_IMAGES``): ellers ville pymupdf4llm
   skrive hundredvis af sidecar-PNG'er eller oppuste .md-filer med base64.
 """
@@ -31,6 +34,7 @@ import os
 os.environ.setdefault("PYMUPDF_SUGGEST_LAYOUT_ANALYZER", "0")
 
 from dataclasses import dataclass, field
+import functools
 from pathlib import Path
 import re
 
@@ -308,11 +312,267 @@ def _extract_page_markdown(work, progress=None, cancel=None) -> list[str]:
 
 
 def _page_markdown(work, page_index: int, chunk) -> str:
-    """Én sides rå pymupdf4llm-output gjort klar til eksport."""
-    text = chunk.get("text", "")
+    """Én sides rå pymupdf4llm-output gjort klar til eksport.
+
+    En side sat helt i en fastbreddeskrift går uden om pymupdf4llm: dér ER
+    tegnenes placering tabellen (se ``_monospace_grid``).
+    """
     if page_index < work.page_count:
-        text = _restore_table_headers(work[page_index], text)
-    return _clean_extracted_markdown(text)
+        page = work[page_index]
+        grid = _monospace_grid(page)
+        if grid:
+            return grid
+        text = _restore_trailing_minus(page, chunk.get("text", ""))
+        text = _restore_table_headers(page, text)
+    else:
+        text = chunk.get("text", "")
+    return _drop_empty_tables(_clean_extracted_markdown(text))
+
+
+# ---------------------------------------------------------------------------
+# Efterstillet minus
+# ---------------------------------------------------------------------------
+
+# pymupdf4llm fjerner orddeling med ``md_string.replace("-\n", "")``
+# (pymupdf_rag.py, get_page_output). Det rammer også et beløb med efterstillet
+# minus sidst på en linje, som lønsedler skriver fradrag: "592,39-" og næste
+# linje bliver til "592,396251 Pension …" — et fradrag bliver til et tillæg.
+# Et beløb med decimaler foran bindestregen er aldrig en orddeling, så de
+# steder sættes minus og linjeskift ind igen ud fra sidens egne ord. Kun beløb:
+# "1990-" og "uge 12-" kan godt være en tankestreg.
+_TRAILING_MINUS_RE = re.compile(r"\d[.,]\d+-$")
+_MINUS_CONTEXT_WORDS = 3
+
+
+def _restore_trailing_minus(page, text: str) -> str:
+    """Giv beløb med efterstillet minus deres fortegn tilbage.
+
+    Et beløb kan stå både med og uden minus på samme side (A-skat i
+    specifikationen og i opsummeringen). En forekomst i teksten rettes derfor
+    kun når siden ikke har en fortegnsløs tvilling med samme kontekst; ellers
+    tages ét ord mere fra linjen med, og lykkes det ikke, lades den stå.
+    Hellere et manglende minus end et forkert.
+    """
+    if not text or not any(ch.isdigit() for ch in text):
+        return text
+    try:
+        words = page.get_text("words")
+    except Exception as e:
+        logger.debug("ord til minusreparation fejlede: %s", e)
+        return text
+    grouped = {}
+    for w in words:
+        grouped.setdefault((w[5], w[6]), []).append((w[7], w[4]))
+    lines = [[t for _n, t in sorted(ws)] for ws in grouped.values()]
+    signed = [(ws, i) for ws in lines for i, t in enumerate(ws)
+              if _TRAILING_MINUS_RE.search(t)]
+    if not signed:
+        return text
+
+    def key(ws, i, k):
+        """De k ord der slutter i ws[i], med et efterstillet minus skrællet af."""
+        last = ws[i][:-1] if _TRAILING_MINUS_RE.search(ws[i]) else ws[i]
+        return " ".join(ws[i - k + 1:i] + [last])
+
+    # Fortegnsløse forekomster pr. kontekst: dem må reparationen ikke ramme.
+    unsigned = {k: {key(ws, i, k) for ws in lines for i in range(k - 1, len(ws))
+                    if ws[i][-1:].isdigit()}
+                for k in range(1, _MINUS_CONTEXT_WORDS + 1)}
+    contexts = set()
+    for ws, i in signed:
+        for k in range(1, min(i + 1, _MINUS_CONTEXT_WORDS) + 1):
+            candidate = key(ws, i, k)
+            if candidate not in unsigned[k]:
+                contexts.add(candidate)
+                break
+
+    def fix(m):
+        rest = m.string[m.end():m.end() + 1]
+        if rest in ("", "\n", "|", "<"):
+            return m.group("amount") + "-" + m.group("ws")
+        # Limet på næste linje; dens indryk hører ikke til.
+        return m.group("amount") + "-\n"
+
+    for context in sorted(contexts, key=len, reverse=True):
+        # Ikke midt i et andet tal, og ikke allerede med minus.
+        # pymupdf4llm's rå tekst kan have flere mellemrum mellem ordene.
+        body = r"[ \t]+".join(re.escape(w) for w in context.split(" "))
+        pattern = re.compile(r"(?<![\w.,])(?P<amount>" + body
+                             + r")(?!-)(?P<ws>[ \t]*)")
+        text = pattern.sub(fix, text)
+    return text
+
+
+# ---------------------------------------------------------------------------
+# Rammer der ikke er tabeller
+# ---------------------------------------------------------------------------
+
+# En ramme med vandrette skillestreger ligner en tabel for strategien "lines":
+# rammen om en lønspecifikation blev en 4×3-tabel hvis øverste rækker er én
+# flettet celle — og PyMuPDF's ``Table.to_markdown`` kopierer en flettet celle
+# ind i alle kolonner (``fill_empty``), så hele specifikationen stod tre gange.
+# pymupdf4llm har ingen indstilling til det og læser kun ``find_tables().tables``,
+# så rammerne sorteres fra dér. Indholdet går så gennem pymupdf4llm's
+# almindelige tekstvej. Målt: rammer har en celle over hele rækken med 9-23
+# linjer; rigtige tabeller har ingen sådan række og højst 8 linjer i en celle.
+_FRAME_MIN_LINES = 4
+
+
+def _is_frame(table) -> bool:
+    """Er tabellen en ramme om tekst: en række der er én celle over hele
+    bredden og rummer flere tekstlinjer. En mellemoverskrift i en rigtig
+    tabel spænder også over rækken, men er én eller to linjer."""
+    if table.col_count < 2:
+        return False
+    try:
+        rows = table.extract()
+    except Exception:
+        return False
+    for row in rows:
+        filled = [c for c in row if c is not None]
+        if len(filled) != 1:
+            continue
+        if sum(1 for l in (filled[0] or "").splitlines() if l.strip()) >= _FRAME_MIN_LINES:
+            return True
+    return False
+
+
+def _without_frames(find_tables):
+    @functools.wraps(find_tables)
+    def find_tables_without_frames(page, *args, **kwargs):
+        finder = find_tables(page, *args, **kwargs)
+        try:
+            finder.tables = [t for t in finder.tables if not _is_frame(t)]
+        except Exception as e:
+            logger.debug("rammefilter fejlede: %s", e)
+        return finder
+    find_tables_without_frames._unitedocs_frames = True
+    return find_tables_without_frames
+
+
+# Installeres ved import og gælder hele processen. Kun pymupdf4llm og
+# ``_restore_table_headers`` kalder ``find_tables``, og de skal se de samme
+# tabeller — ellers parres overskrifterne med de forkerte tabeller.
+if not getattr(pymupdf.Page.find_tables, "_unitedocs_frames", False):
+    pymupdf.Page.find_tables = _without_frames(pymupdf.Page.find_tables)
+
+
+# ---------------------------------------------------------------------------
+# Sider sat i fastbreddeskrift
+# ---------------------------------------------------------------------------
+
+# Lønsedler, kontoudtog og andre udskrifter fra ældre systemer er sat i Courier
+# fra øverst til nederst og bygger kolonnerne med mellemrum. pymupdf4llm gør
+# dem ulæselige på tre måder på én gang: hver linje bliver til kode med
+# mellemrummene slået sammen (kolonnerne er væk), rammen om et afsnit bliver en
+# "tabel" hvis flettede celler gentages i hver kolonne (``fill_empty`` i
+# PyMuPDF's ``Table.to_markdown``, som pymupdf4llm ikke kan slå fra), og en
+# maskeringsbjælke bliver en tom ``|Col1|Col2|``-tabel. I en fastbreddeskrift
+# er x-koordinaten et kolonnenummer, så siden kan gengives tabsfrit som tekst.
+_MONO_SHARE = 0.9          # andel af sidens tegn der skal være fastbredde
+_MONO_MIN_CHARS = 20
+_MONO_NAMES = ("courier", "mono", "consol", "lucidaconsole", "letter gothic")
+
+
+def _is_mono_span(span) -> bool:
+    if span["flags"] & pymupdf.TEXT_FONT_MONOSPACED:
+        return True
+    name = span["font"].lower()
+    return any(n in name for n in _MONO_NAMES)
+
+
+def _monospace_grid(page) -> str:
+    """Siden som en kodeblok med tegnene på deres oprindelige kolonne, eller ""
+    hvis siden ikke er sat i en fastbreddeskrift."""
+    try:
+        blocks = page.get_text("rawdict")["blocks"]
+    except Exception as e:
+        logger.debug("rawdict fejlede: %s", e)
+        return ""
+
+    chars = []          # (grundlinje, x, tegn, størrelse)
+    mono = total = 0
+    for block in blocks:
+        for line in block.get("lines", ()):
+            if abs(line["dir"][1]) > 0.01:
+                continue                    # lodret/skrå tekst passer ikke i gitteret
+            for span in line["spans"]:
+                is_mono = _is_mono_span(span)
+                for ch in span["chars"]:
+                    c = ch["c"]
+                    if not c.strip():
+                        continue
+                    total += 1
+                    mono += is_mono
+                    chars.append((ch["origin"][1], ch["origin"][0], c,
+                                  span["size"], ch["bbox"][2] - ch["bbox"][0]))
+    if total < _MONO_MIN_CHARS or mono < _MONO_SHARE * total:
+        return ""
+
+    # Tegnbredden måles frem for at antage Courier's 0,6 × skriftstørrelse.
+    widths = sorted(w for *_r, w in chars if w > 0)
+    cw = widths[len(widths) // 2] if widths else 0
+    if cw <= 0:
+        return ""
+    x_min = min(x for _y, x, *_r in chars)
+
+    # Rækker: tegn hvis grundlinjer ligger inden for en tredjedel tegnhøjde.
+    chars.sort(key=lambda t: (t[0], t[1]))
+    rows = []
+    for y, x, c, size, _w in chars:
+        if rows and y - rows[-1][0] <= size / 3:
+            rows[-1][1].append((x, c))
+        else:
+            rows.append([y, [(x, c)]])
+
+    gaps = sorted(b[0] - a[0] for a, b in zip(rows, rows[1:]))
+    pitch = gaps[len(gaps) // 2] if gaps else 0
+
+    out = []
+    prev_y = None
+    for y, row in rows:
+        if prev_y is not None and pitch and y - prev_y > 1.8 * pitch:
+            out.append("")                  # bevar luften mellem afsnit
+        prev_y = y
+        line = ""
+        for x, c in sorted(row):
+            col = int(round((x - x_min) / cw))
+            # Et tegn der ville overskrive et andet, sættes bag det.
+            line += " " * max(0, col - len(line)) + c
+        out.append(line.rstrip())
+    # Kodeblokke er det eneste i Markdown der bevarer mellemrum.
+    return "```\n" + "\n".join(out) + "\n```"
+
+
+_MD_TABLE_ROW_RE = re.compile(r"^\|.*\|$")
+_PLACEHOLDER_CELL_RE = re.compile(r"^(Col\d+)?$")
+
+
+def _drop_empty_tables(text: str) -> str:
+    """Fjern tabeller uden en eneste celle med indhold.
+
+    Typisk en maskeringsbjælke: et udfyldt sort rektangel som strategien "lines"
+    tager for en celle. Tilbage står ``|Col1|Col2|`` og tomme rækker.
+    """
+    if not text or "|---|" not in text:
+        return text
+    lines = text.split("\n")
+    out, i = [], 0
+    while i < len(lines):
+        if not _MD_TABLE_ROW_RE.match(lines[i]):
+            out.append(lines[i])
+            i += 1
+            continue
+        j = i
+        while j < len(lines) and _MD_TABLE_ROW_RE.match(lines[j]):
+            j += 1
+        block = lines[i:j]
+        cells = [c.strip() for row in block for c in row.strip("|").split("|")]
+        if any(set(c) - {"-", ":"} and not _PLACEHOLDER_CELL_RE.match(c)
+               for c in cells):
+            out.extend(block)
+        i = j
+    return "\n".join(out)
 
 
 # ---------------------------------------------------------------------------
@@ -550,7 +810,9 @@ def _render_text(title: str, chapters: list[_RenderedChapter], total_missing: in
             out.append(ch.error_text)
             continue
         out.append(_strip_markdown_to_text(ch.body))
-    return "\n\n".join(part for part in out).strip() + "\r\n"
+    # Kun linjeskift: en side i fastbreddeskrift starter med et indryk der er
+    # en del af layoutet (se ``_monospace_grid``).
+    return "\n\n".join(part for part in out).strip("\r\n") + "\r\n"
 
 
 _TABLE_SEP_RE = re.compile(r"^\s*\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)*\|?\s*$")
@@ -572,21 +834,28 @@ def _strip_markdown_to_text(body: str) -> str:
 
     `<br>` er allerede fjernet i _clean_extracted_markdown. Her fladgøres
     tabelrækker (`|...|`) til tab-adskilte celler, og separatorrækker (`|---|`)
-    droppes, så outputtet ikke er fuldt af lodrette streger.
+    droppes, så outputtet ikke er fuldt af lodrette streger. En kodeblok (en
+    side i fastbreddeskrift, se ``_monospace_grid``) står urørt uden hegn.
     """
     lines_out = []
+    in_code = False
     for line in body.splitlines():
+        if line.startswith("```"):
+            in_code = not in_code
+            continue                                     # drop hegnet, behold indholdet
+        if in_code:
+            lines_out.append(line)                       # mellemrummene ER kolonnerne
+            continue
         if _TABLE_SEP_RE.match(line):
             continue                                     # drop |---|---| rækker
         if line.lstrip().startswith("|"):
             line = _flatten_table_line(line)
+        line = re.sub(r"^#{1,6}\s*", "", line)           # overskrifter
+        line = re.sub(r"^>\s?", "", line)                 # blockquotes
+        line = re.sub(r"\*\*(.+?)\*\*", r"\1", line)      # fed
+        line = re.sub(r"(?<!\*)\*(?!\*)(.+?)\*", r"\1", line)  # kursiv
         lines_out.append(line)
-    text = "\n".join(lines_out)
-    text = re.sub(r"(?m)^#{1,6}\s*", "", text)           # overskrifter
-    text = re.sub(r"(?m)^>\s?", "", text)                 # blockquotes
-    text = re.sub(r"\*\*(.+?)\*\*", r"\1", text)          # fed
-    text = re.sub(r"(?<!\*)\*(?!\*)(.+?)\*", r"\1", text)  # kursiv
-    return text
+    return "\n".join(lines_out)
 
 
 _EPUB_CSS = (
@@ -602,15 +871,21 @@ def _markdown_to_xhtml(md_body: str) -> str:
     import markdown
     from markdown.extensions.tables import TableExtension
     from markdown.extensions.sane_lists import SaneListExtension
+    from markdown.extensions.fenced_code import FencedCodeExtension
     # Nuitka-fælde: send udvidelses-INSTANSER, ikke navne — navneopslag via
     # importlib.metadata entry points knækker rutinemæssigt i frosne builds.
+    # FencedCode: en side i fastbreddeskrift er én ```-blok (``_monospace_grid``)
+    # og skal blive til <pre>, ellers falder kolonnerne sammen.
     html = markdown.markdown(
         md_body,
         output_format="xhtml",   # EPUB 2 kræver velformet XHTML (<br />)
-        extensions=[TableExtension(), SaneListExtension()],
+        extensions=[TableExtension(), SaneListExtension(), FencedCodeExtension()],
     )
     # Markér placeholder-blockquotes så CSS'en kan fremhæve dem.
     html = html.replace("<blockquote>", '<blockquote class="ud-missing">')
+    # <pre> uden <code>-barn: EbookLib pretty-printer ved gem og indrykker et
+    # barn-element — inde i <pre> er det indrykket synligt på første linje.
+    html = html.replace("<pre><code>", "<pre>").replace("</code></pre>", "</pre>")
     return html
 
 

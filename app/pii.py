@@ -230,6 +230,29 @@ def postal_match(text: str):
     return False
 
 
+def postal_prefix(text: str):
+    """Det laengste ``postnummer + by`` i starten af ``text`` der kan valideres.
+
+    ``POSTAL_RE`` tager op til to ord efter bynavnet med, fordi bynavne kan
+    vaere flerleddede (``Kongens Lyngby``, ``Hvide Sande``). Moensteret er
+    graadigt, saa staar der et ord med stort efter byen — ``8500 Grenaa Hun
+    sagde`` eller en etiket i naeste spalte — kommer det med, valideringen
+    afviser helheden, og Presidio proever aldrig det kortere match. Saa
+    forsvandt postnummeret helt: **under**maskering. Her skrelles ord af bagfra
+    til et praefiks valideres. ``None`` hvis intet goer.
+    """
+    s = (text or "").rstrip()
+    while True:
+        cut = max(s.rfind(" "), s.rfind("\t"), s.rfind("-"))
+        if cut <= 0:
+            return None
+        s = s[:cut].rstrip()
+        if not re.search(r"[^\W\d_]", s):     # kun postnummeret tilbage
+            return None
+        if postal_match(s):
+            return s
+
+
 # ---------------------------------------------------------------------------
 # Moenstre
 # ---------------------------------------------------------------------------
@@ -280,9 +303,12 @@ _STREET_SUFFIX_CAP = "|".join(s[:1].upper() + s[1:]
 #: advokatens navn ind i adressen, og det laengste spen vinder overlapskampen.
 _STREET_WORD = (r"(?:[A-ZÆØÅ][\wÆØÅæøå.'\-]{0,25}(?:" + _STREET_SUFFIX + r")"
                 r"|(?:" + _STREET_SUFFIX_CAP + r"))")
+#: Husnummerbogstavet skal staa alene (``25 B``, ``25B``): uden lookahead'en tog
+#: moensteret ``N`` fra ``Normtid`` i ``Thorsvej 25 Normtid``, og rectet fulgte
+#: hele ordet med.
 ADDRESS_RE = (r"(?-i:\b(?:[A-ZÆØÅ][\wÆØÅæøå.'\-]{0,20}[ \t]+){0,2}?"
               + _STREET_WORD + r")"
-              r"[ \t]+\d{1,4}[ \t]*[A-Za-z]?"
+              r"[ \t]+\d{1,4}(?:[ \t]*[A-Za-z](?![\wÆØÅæøå]))?"
               r"(?:[ \t]*,?[ \t]*\d{1,2}\.?[ \t]*(?:sal)?[ \t]*,?[ \t]*"
               r"(?:t\.?[hv]\.?|m\.?f\.?))?")
 POSTAL_RE = (r"\b(?:1[0-9]{3}|[2-9][0-9]{3})[ \t]+"
@@ -1012,6 +1038,30 @@ def _build_classes():
 
         def validate_result(self, pattern_text):
             return postal_match(pattern_text)
+
+        def analyze(self, text, entities, nlp_artifacts=None, regex_flags=None):
+            results = super().analyze(text, entities, nlp_artifacts, regex_flags)
+            # Et match valideringen afviste, kan have et gyldigt postnummer + by
+            # i starten -- se postal_prefix. Presidio proever ikke selv kortere.
+            flags = regex_flags or self.global_regex_flags
+            for m in re.finditer(POSTAL_RE, text, flags):
+                if postal_match(m.group(0)):
+                    continue
+                kort = postal_prefix(m.group(0))
+                if not kort:
+                    continue
+                expl = self.build_regex_explanation(
+                    self.name, "postnr+by-kort", POSTAL_RE, 0.45, True, flags)
+                expl.score = EntityRecognizer.MAX_SCORE
+                results.append(RecognizerResult(
+                    entity_type=POSTAL, start=m.start(),
+                    end=m.start() + len(kort), score=EntityRecognizer.MAX_SCORE,
+                    analysis_explanation=expl,
+                    recognition_metadata={
+                        RecognizerResult.RECOGNIZER_NAME_KEY: self.name,
+                        RecognizerResult.RECOGNIZER_IDENTIFIER_KEY: self.id,
+                    }))
+            return results
 
     class CaseNoRecognizer(EntityRecognizer):
         """Sags- og journalnumre.

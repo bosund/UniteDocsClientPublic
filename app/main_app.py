@@ -1150,7 +1150,9 @@ class MainWindow(QMainWindow):
         # Indsaet paa drop-positionen over sidegitteret, ikke altid til sidst.
         insert_index = "end"
         if self.page_view is not None:
-            idx = self.page_view.drop_file_index(event.globalPosition().toPoint())
+            # QDropEvent har kun position() (lokal) -- ingen globalPosition().
+            idx = self.page_view.drop_file_index(
+                self.mapToGlobal(event.position().toPoint()))
             if idx is not None:
                 insert_index = idx
         added = []

@@ -27,16 +27,18 @@ import uuid
 from PySide6.QtCore import QPoint, QRect, QRectF, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QCursor, QFont, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (QAbstractScrollArea, QApplication, QDialog,
-                               QFrame, QMenu, QPlainTextEdit, QPushButton,
-                               QVBoxLayout, QLabel)
+                               QFrame, QLineEdit, QMenu, QPlainTextEdit,
+                               QPushButton, QVBoxLayout, QLabel)
 
 from .undo_stack import N_
 from . import annotations as an
 from . import edit_model as em
 from . import icons_vector
+from . import ocr_text
 from . import page_render
 from . import pdf_renderer
 from . import qt_util
+from . import text_edit
 from . import theme
 from .localization import LocalizationManager
 from .logging_config import get_logger
@@ -94,6 +96,34 @@ class _MultilineDialog(QDialog):
         return v.strip() if v and v.strip() else None
 
 
+class _LineEditor(QLineEdit):
+    """Feltet der laegger sig over en tekstlinje mens den rettes.
+
+    Der findes hoejst ét ad gangen -- det er ikke en widget pr. side. Enter og
+    fokustab gemmer, Escape fortryder."""
+
+    committed = Signal()
+    cancelled = Signal()
+
+    def keyPressEvent(self, event):  # noqa: N802 - Qt-API
+        if event.key() == Qt.Key.Key_Escape:
+            self.cancelled.emit()
+            return
+        if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+            self.committed.emit()
+            return
+        super().keyPressEvent(event)
+
+    def focusOutEvent(self, event):  # noqa: N802 - Qt-API
+        super().focusOutEvent(event)
+        # Feltets egen hoejrekliksmenu tager fokus med PopupFocusReason. Gemte
+        # vi dér, forsvandt feltet under menuen, og "Indsæt" ramte en doed
+        # widget. QLineEdit ignorerer selv den grund af samme aarsag.
+        if event.reason() == Qt.FocusReason.PopupFocusReason:
+            return
+        self.committed.emit()
+
+
 class PageCanvas(QAbstractScrollArea):
 
     zoom_changed = Signal(int)      # procent
@@ -113,6 +143,9 @@ class PageCanvas(QAbstractScrollArea):
         self.by_uid: dict[str, dict] = {}
         self.geom: dict[str, tuple] = {}
         self.words: dict[str, list] = {}
+        self._text_visible: dict[str, bool] = {}   # maa maskering klippes?
+        self._lines: dict[str, list] = {}   # tekstlinjer til "Ret tekst"
+        self._edit = None                   # igangvaerende tekstrettelse
         self.total_w = 0
         self.total_h = 0
         self._gen = 0
@@ -145,6 +178,7 @@ class PageCanvas(QAbstractScrollArea):
 
     # ------------------------------------------------------------- offentligt
     def set_tool(self, tool: str) -> None:
+        self._finish_text_edit(commit=True)
         self.active_tool = tool
         self._clear_selection()
         self._apply_cursor()
@@ -206,6 +240,8 @@ class PageCanvas(QAbstractScrollArea):
             if spec is not None:
                 self.app.undo_stack.push(
                     em.remove_annotation_cmd(self.app.model, page_uid, spec))
+                if spec.kind in text_edit.CONTENT_KINDS:
+                    self._refresh_page_image(page_uid)
         self._clear_selection()
         self.viewport().update()
 
@@ -223,7 +259,8 @@ class PageCanvas(QAbstractScrollArea):
             return False
         _entry, page = found
         spec = next((a for a in page.annots if a.uid == annot_uid), None)
-        if spec is None or spec.kind == an.ANNOT_REDACT:
+        if (spec is None or spec.kind == an.ANNOT_REDACT
+                or spec.kind in text_edit.CONTENT_KINDS):
             return False
         new_color = tuple(rgb)
         if tuple(spec.color) == new_color:
@@ -291,6 +328,7 @@ class PageCanvas(QAbstractScrollArea):
         self._refresh_visible()
 
     def _compute_layout(self) -> None:
+        self._finish_text_edit(commit=True)
         self.pages = []
         self.by_uid = {}
         cw = max(1, self.viewport().width())
@@ -368,6 +406,8 @@ class PageCanvas(QAbstractScrollArea):
         return top - buffer, top + h + buffer
 
     def _on_scrolled(self) -> None:
+        # Feltet ligger i udsnittets koordinater og foelger ikke med siden.
+        self._finish_text_edit(commit=True)
         self.rmgr.notify_activity()
         self.viewport().update()
         self._render_timer.start(30)
@@ -388,14 +428,16 @@ class PageCanvas(QAbstractScrollArea):
             self._requested.add(uid)
             page = rec["page"]
             box = (rec["w"], rec["h"])
+            edits = page_render.content_edits_of(page)
             cached = self.rmgr.cache.get(page_render.cache_key(
-                page.src_path, page.src_index, page.rotation, box, page.crop))
+                page.src_path, page.src_index, page.rotation, box, page.crop, edits))
             if cached is not None:
                 self._pix[uid] = icons_vector.pil_to_qpixmap(cached)
             else:
                 self.rmgr.request(uid, page.src_path, pw, page.src_index,
                                   page.rotation, box, self._on_page_ready,
-                                  priority=1, generation=gen, crop=page.crop)
+                                  priority=1, generation=gen, crop=page.crop,
+                                  edits=edits)
         self.viewport().update()
         self._notify_page()
 
@@ -445,6 +487,8 @@ class PageCanvas(QAbstractScrollArea):
         for uid, words in by_uid.items():
             if words:
                 self.words[uid] = words
+                # OCR-ord ligger over et billede: dét skal maskeringen blanke.
+                self._text_visible[uid] = False
         self.viewport().update()
 
     def _hint_no_text(self) -> None:
@@ -688,9 +732,12 @@ class PageCanvas(QAbstractScrollArea):
         tool = self.active_tool
         x0, y0 = d["x0"], d["y0"]
         x1, y1 = d.get("x1", x0), d.get("y1", y0)
-        col = (QColor(theme.C["accent"]) if tool == "crop" else _qcolor(self.color))
+        # Beskaer og Slet omraade tegner en stiplet ramme i accentfarven: de
+        # laver ikke en figur i den valgte farve.
+        frame = tool in ("crop", "erase")
+        col = QColor(theme.C["accent"]) if frame else _qcolor(self.color)
         pen = QPen(col, 2)
-        if tool == "crop":
+        if frame:
             pen.setStyle(Qt.PenStyle.DashLine)
         p.setPen(pen)
         p.setBrush(Qt.BrushStyle.NoBrush)
@@ -728,7 +775,9 @@ class PageCanvas(QAbstractScrollArea):
     def _spec_bbox(rec, spec) -> QRectF | None:
         vt = rec["vt"]
         xs, ys = [], []
-        for r in (spec.rects or ()):
+        # En tekstrettelse fylder hele sin linje, ogsaa hvor intet blev slettet.
+        rects = (spec.edit.line_rect,) if spec.edit is not None else (spec.rects or ())
+        for r in rects:
             for (px, py) in ((r[0], r[1]), (r[2], r[3])):
                 cx, cy = vt.pdf_to_canvas(px, py)
                 xs.append(cx)
@@ -776,7 +825,8 @@ class PageCanvas(QAbstractScrollArea):
         # Krydset lovede en frihaandsramme og var derfor misvisende.
         if self.active_tool == "hand":
             shape = Qt.CursorShape.OpenHandCursor
-        elif self.active_tool == "select" or self.active_tool in _TEXT_TOOLS:
+        elif (self.active_tool in ("select", "edit_text", "insert_text")
+              or self.active_tool in _TEXT_TOOLS):
             shape = Qt.CursorShape.IBeamCursor
         else:
             shape = Qt.CursorShape.CrossCursor
@@ -814,7 +864,19 @@ class PageCanvas(QAbstractScrollArea):
             self.viewport().update()
             return
         rec = self._page_at(cx, cy)
+        if tool in ("edit_text", "insert_text"):
+            self._draw = None
+            self._finish_text_edit(commit=True)
+            if rec is not None and self._pdf_only(rec):
+                if tool == "edit_text":
+                    self._begin_text_edit(rec, cx, cy)
+                else:
+                    self._begin_insert_text(rec, cx, cy)
+            return
         if rec is None:
+            self._draw = None
+            return
+        if tool == "erase" and not self._pdf_only(rec):
             self._draw = None
             return
         if tool in _TEXT_TOOLS:
@@ -937,6 +999,12 @@ class PageCanvas(QAbstractScrollArea):
             self._commit(rec["uid"], em.AnnotationSpec(
                 kind=an.ANNOT_REDACT, rects=(r,), color=(0, 0, 0), fill=(0, 0, 0),
                 source="manual"))
+        elif tool == "erase":
+            self.app.undo_stack.push(em.set_text_edit_cmd(
+                self.app.model, rec["uid"], None,
+                em.AnnotationSpec(kind=an.ANNOT_ERASE, rects=(r,)),
+                label=N_("Slet område")))
+            self._refresh_page_image(rec["uid"])
         elif tool == "freetext":
             dlg = _MultilineDialog(self, _("Tekst"), _("Skriv tekst:"))
             if dlg.exec() != QDialog.DialogCode.Accepted:
@@ -1003,6 +1071,7 @@ class PageCanvas(QAbstractScrollArea):
             return
         rects = tuple(sel["rects"])
         if kind == "redact":
+            rects = self._redact_rects(sel["page_uid"], rects)
             spec = em.AnnotationSpec(kind=an.ANNOT_REDACT, rects=rects,
                                      color=(0, 0, 0), fill=(0, 0, 0), source="manual")
         else:
@@ -1021,16 +1090,259 @@ class PageCanvas(QAbstractScrollArea):
         if view is not None:
             view.search_and_redact(text)
 
+    # ---------------------------------------------------------- ret tekst
+    # En linje ad gangen og uden ombrydning -- se text_edit.py. Rettelsen bages
+    # ind i sidens billede (render-cachens noegle har den med), saa fremviseren
+    # tegner intet overlay for den.
+
+    def _page_lines(self, rec) -> list:
+        uid = rec["uid"]
+        if uid not in self._lines:
+            page = rec["page"]
+            self._lines[uid] = (
+                pdf_renderer.page_lines(page.src_path,
+                                        self.app._get_all_passwords(),
+                                        page.src_index)
+                if rec["kind"] == "pdf" else [])
+        return self._lines[uid]
+
+    def _begin_text_edit(self, rec, cx, cy) -> None:
+        x, y = rec["vt"].canvas_to_pdf(cx, cy)
+        lines = self._page_lines(rec)
+        line = text_edit.line_at(lines, x, y)
+        if line is None:
+            if lines:
+                self.app.set_status(_("Klik på en tekstlinje for at rette den"),
+                                    transient_ms=6000)
+            else:
+                self.app.set_status(
+                    _("Siden har ingen tekst der kan rettes. Scannede sider kan "
+                      "ikke rettes."), transient_ms=8000, kind="warning")
+            return
+        if not line.editable:
+            self.app.set_status(
+                _("Linjen kan ikke rettes: teksten står på skrå eller bruger en "
+                  "særlig skrifttype"), transient_ms=8000, kind="warning")
+            return
+
+        page = rec["page"]
+        existing = text_edit.find_edit(page.annots, line)
+        current = existing.text if existing is not None else line.text
+        # Mellemrum foran og bagved er usynlige i feltet og skal ikke kunne
+        # slettes ved et uheld: de saettes paa igen ved commit.
+        body = current.strip()
+        lead = current[:len(current) - len(current.lstrip())]
+        trail = current[len(current.rstrip()):]
+
+        ed = _LineEditor(self.viewport())
+        f = QFont(theme.font("base"))
+        size = max(1.0, line.rect[3] - line.rect[1])
+        f.setPixelSize(max(9, int(round(size * self.zoom * 0.8))))
+        ed.setFont(f)
+        ed.setText(body)
+        ed.selectAll()
+        self._edit = {"mode": "line", "editor": ed, "uid": rec["uid"], "line": line,
+                      "existing": existing, "lead": lead, "trail": trail}
+        ed.committed.connect(lambda: self._finish_text_edit(commit=True))
+        ed.cancelled.connect(lambda: self._finish_text_edit(commit=False))
+
+        # Paa en roteret visning er linjen ikke vandret paa skaermen; feltet
+        # laegges saa under klikket i stedet for oven paa linjen.
+        o = self._origin()
+        if rec["vt"].deg == 0:
+            x0, y0 = rec["vt"].pdf_to_canvas(line.rect[0], line.rect[1])
+            x1, y1 = rec["vt"].pdf_to_canvas(line.rect[2], line.rect[3])
+            w = max(160, int(abs(x1 - x0) * 1.25) + 24)
+            h = max(ed.sizeHint().height(), int(abs(y1 - y0)) + 8)
+            left, top = int(min(x0, x1)) - 4, int((min(y0, y1) + max(y0, y1)) / 2 - h / 2)
+        else:
+            w, h = 320, ed.sizeHint().height()
+            left, top = int(cx) - 8, int(cy) + 12
+        vw = self.viewport().width()
+        w = min(w, max(160, vw - 8))
+        left = max(4, min(left - o.x(), vw - w - 4))
+        ed.setGeometry(left, top - o.y(), w, h)
+        ed.show()
+        ed.setFocus()
+
+    def _finish_text_edit(self, commit: bool) -> None:
+        """Luk feltet; gem rettelsen hvis ``commit``. Sikker at kalde flere
+        gange -- fokustab efter Enter kalder den igen."""
+        st, self._edit = self._edit, None
+        if st is None:
+            return
+        ed = st["editor"]
+        text = ed.text()
+        ed.hide()
+        ed.deleteLater()
+        self.setFocus()
+        if not commit:
+            return
+        if st["mode"] == "insert":
+            self._apply_insert_text(st, text)
+        else:
+            self._apply_text_edit(st["uid"], st["line"], st["existing"],
+                                  st["lead"] + text + st["trail"])
+
+    def _pdf_only(self, rec) -> bool:
+        """Rediger-vaerktoejerne arbejder paa PDF-indhold. En billedfil har intet
+        (den bliver foerst en PDF-side ved gem)."""
+        if rec["kind"] == "pdf":
+            return True
+        self.app.set_status(_("Virker kun på PDF-sider"), transient_ms=6000,
+                            kind="warning")
+        return False
+
+    # ------------------------------------------------------- indsaet tekst
+    def _begin_insert_text(self, rec, cx, cy) -> None:
+        """Aabn feltet hvor der blev klikket -- eller over en indsat tekst der
+        rammes, saa den kan rettes (tom tekst fjerner den)."""
+        x, y = rec["vt"].canvas_to_pdf(cx, cy)
+        page = rec["page"]
+        existing = text_edit.insert_at(page.annots, x, y)
+        lines = self._page_lines(rec)
+        ref = text_edit.nearest_line(lines, x, y)
+        size = (existing.fontsize if existing is not None
+                else (ref.rect[3] - ref.rect[1]) if ref is not None
+                else text_edit.DEFAULT_SIZE)
+
+        ed = _LineEditor(self.viewport())
+        f = QFont(theme.font("base"))
+        f.setPixelSize(max(9, int(round(size * self.zoom * 0.8))))
+        ed.setFont(f)
+        if existing is not None:
+            ed.setText(existing.text)
+            ed.selectAll()
+        self._edit = {"mode": "insert", "editor": ed, "uid": rec["uid"],
+                      "point": (x, y), "angle": rec["vt"].deg, "lines": lines,
+                      "existing": existing}
+        ed.committed.connect(lambda: self._finish_text_edit(commit=True))
+        ed.cancelled.connect(lambda: self._finish_text_edit(commit=False))
+
+        o = self._origin()
+        h = max(ed.sizeHint().height(), int(size * self.zoom) + 8)
+        if existing is not None and rec["vt"].deg == 0:
+            bx0, by0 = rec["vt"].pdf_to_canvas(*existing.edit.line_rect[:2])
+            left, top = int(bx0) - 4, int(by0) - 4
+        else:
+            left, top = int(cx) - 4, int(cy - h / 2)
+        vw = self.viewport().width()
+        w = min(320, max(160, vw - 8))
+        left = max(4, min(left - o.x(), vw - w - 4))
+        ed.setGeometry(left, top - o.y(), w, h)
+        ed.show()
+        ed.setFocus()
+
+    def _apply_insert_text(self, st, text: str) -> None:
+        found = self.app.model.page_by_uid(st["uid"])
+        if not found:
+            return
+        _entry, page = found
+        existing = st["existing"]
+        text = text.strip()
+        if existing is not None and text == existing.text:
+            return
+        plan = None
+        if text:
+            x, y = st["point"]
+            plan = pdf_renderer.plan_insert_text(
+                page.src_path, self.app._get_all_passwords(), page.src_index,
+                st["lines"], x, y, text, angle=st["angle"],
+                origin=existing.edit.origin if existing is not None else None)
+            if plan is None:
+                self.app.set_status(_("Teksten kunne ikke indsættes"),
+                                    transient_ms=6000, kind="error")
+                return
+        new_spec = plan.spec if plan is not None else None
+        if existing is None and new_spec is None:
+            return
+        self.app.undo_stack.push(em.set_text_edit_cmd(
+            self.app.model, st["uid"], existing, new_spec, label=N_("Indsæt tekst")))
+        self._refresh_page_image(st["uid"])
+        self._report_plan(plan)
+
+    def _report_plan(self, plan) -> None:
+        """Statuslinjen skal sige det hvis skriften er skiftet ud eller teksten
+        ikke kan vaere der -- ellers ligner det en fejl."""
+        if plan is None:
+            return
+        if plan.font_replaced:
+            self.app.set_status(
+                _("Dokumentets skrifttype mangler nogle af tegnene. Der er brugt "
+                  "%s i stedet.") % plan.fallback_name,
+                transient_ms=10000, kind="warning")
+        elif plan.overflow:
+            self.app.set_status(
+                _("Teksten er længere end der er plads til og går ud over linjen"),
+                transient_ms=10000, kind="warning")
+
+    def _apply_text_edit(self, page_uid, line, existing, new_text) -> None:
+        found = self.app.model.page_by_uid(page_uid)
+        if not found:
+            return
+        _entry, page = found
+        if existing is not None and new_text == existing.text:
+            return
+        plan = None
+        if new_text != line.text:
+            plan = pdf_renderer.plan_text_edit(page.src_path,
+                                               self.app._get_all_passwords(),
+                                               page.src_index, line, new_text)
+            if plan is None:
+                self.app.set_status(_("Teksten kunne ikke rettes"),
+                                    transient_ms=6000, kind="error")
+                return
+        new_spec = plan.spec if plan is not None else None
+        if existing is None and new_spec is None:
+            return
+        self.app.undo_stack.push(
+            em.set_text_edit_cmd(self.app.model, page_uid, existing, new_spec))
+        self._refresh_page_image(page_uid)
+        self._report_plan(plan)
+
+    def _refresh_page_image(self, page_uid) -> None:
+        """Bestil sidens billede igen. Det gamle bliver staaende til det nye
+        er klar, saa siden ikke blinker."""
+        self._requested.discard(page_uid)
+        self._refresh_visible()
+        view = getattr(self.app, "page_view", None)
+        if view is not None:
+            view.refresh_page_images()
+
     # ------------------------------------------------------------ commits
     def _commit(self, page_uid, spec) -> None:
         self.app.undo_stack.push(em.add_annotation_cmd(self.app.model, page_uid, spec))
         self.viewport().update()
 
+    def _redact_rects(self, page_uid, rects) -> tuple:
+        """Markeringens rects klippet saa maskeringen ikke sletter nabolinjer.
+
+        Markeringen er bygget af hele ordbokse, og de er hoejere end
+        linjeafstanden paa taet sat tekst -- se ``ocr_text.clip_to_page_words``.
+        Kun maskering klippes: en fremhaevning sletter ingenting. Og kun naar
+        sidens tekst er det synlige; paa en scanning skal billedet blankes i
+        fuld hoejde.
+        """
+        visible = self._text_visible.get(page_uid)
+        if visible is None:
+            rec = self.by_uid.get(page_uid)
+            page = rec["page"] if rec is not None else None
+            visible = bool(page is not None and rec["kind"] == "pdf"
+                           and pdf_renderer.page_text_visible(
+                               page.src_path, self.app._get_all_passwords(),
+                               page.src_index))
+            self._text_visible[page_uid] = visible
+        if not visible:
+            return tuple(rects)
+        return tuple(ocr_text.clip_to_page_words(
+            rects, self.words.get(page_uid) or ()))
+
     def _commit_text(self, page_uid, tool, rects) -> None:
         if not rects:
             return
         if tool == "redact_text":
-            spec = em.AnnotationSpec(kind=an.ANNOT_REDACT, rects=tuple(rects),
+            spec = em.AnnotationSpec(kind=an.ANNOT_REDACT,
+                                     rects=self._redact_rects(page_uid, rects),
                                      color=(0, 0, 0), fill=(0, 0, 0), source="manual")
         else:
             kind = {"highlight": an.ANNOT_HIGHLIGHT, "underline": an.ANNOT_UNDERLINE,

@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import pymupdf
 
+from . import text_edit
 from .logging_config import get_logger
 
 logger = get_logger(__name__)
@@ -31,6 +32,9 @@ ANNOT_CIRCLE = "circle"
 ANNOT_TEXT = "text"            # sticky note
 ANNOT_FREETEXT = "freetext"
 ANNOT_REDACT = "redact"
+ANNOT_TEXTEDIT = text_edit.ANNOT_TEXTEDIT
+ANNOT_ERASE = text_edit.ANNOT_ERASE
+ANNOT_INSERT_TEXT = text_edit.ANNOT_INSERT_TEXT
 
 _TEXT_MARKUP = {ANNOT_HIGHLIGHT, ANNOT_UNDERLINE, ANNOT_STRIKEOUT}
 
@@ -41,8 +45,13 @@ def _rects(spec):
 
 def apply_specs_to_page(page, specs) -> None:
     """Apply every :class:`AnnotationSpec` in ``specs`` to a live merged page."""
+    # Rediger-gruppens indholdsrettelser foerst (ret tekst, slet omraade,
+    # indsaet tekst): de er selv redactions med egne indstillinger og skal ligge
+    # under baade maskeringen og de synlige annotationer. Se text_edit.apply.
+    text_edit.apply(page, specs)
     redacts = [s for s in specs if s.kind == ANNOT_REDACT]
-    visible = [s for s in specs if s.kind != ANNOT_REDACT]
+    visible = [s for s in specs
+               if s.kind != ANNOT_REDACT and s.kind not in text_edit.CONTENT_KINDS]
 
     if redacts:
         # Redactions are computed in unrotated points; neutralise /Rotate so the
@@ -51,11 +60,12 @@ def apply_specs_to_page(page, specs) -> None:
         try:
             if original_rot:
                 page.set_rotation(0)
-            for s in redacts:
-                fill = s.fill if s.fill is not None else (0, 0, 0)
-                for r in _rects(s):
-                    page.add_redact_annot(r, fill=fill)
-            page.apply_redactions()
+            # Kun VORES maskeringer: kildefilens egne, ikke-udfoerte markeringer
+            # ville ellers blive udfoert med -- bekraeftelsesdialogen taeller
+            # kun vores (se text_edit.apply_own_redactions).
+            items = [(tuple(r), s.fill if s.fill is not None else (0, 0, 0))
+                     for s in redacts for r in s.rects]
+            text_edit.apply_own_redactions(page, items)
         finally:
             if original_rot:
                 page.set_rotation(original_rot)

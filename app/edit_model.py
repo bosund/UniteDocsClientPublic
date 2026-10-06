@@ -31,6 +31,28 @@ KIND_IMAGE = "image"
 
 
 @dataclass(frozen=True)
+class TextEdit:
+    """Det en tekstrettelse (``kind == "textedit"``) og indsat tekst
+    (``kind == "inserttext"``) har brug for ud over ``AnnotationSpec``'s
+    faelles felter. Se ``text_edit.py``.
+
+    En rettelse er altid regnet ud fra linjens **oprindelige** tekst -- ogsaa
+    naar den rettes igen -- saa der hoerer praecis én spec til hver linje.
+    ``AnnotationSpec.rects`` er de tegn der fjernes, ``AnnotationSpec.text`` er
+    hele linjens nye tekst (til editoren), og ``insert`` er dét der skrives.
+    """
+
+    old_text: str                 # linjens oprindelige tekst
+    line_rect: tuple              # linjens ramme (A-space) -- noeglen til linjen
+    insert: str                   # teksten der skrives fra ``origin``
+    origin: tuple                 # (x, y) grundlinjens start i A-space
+    font: str = ""                # indlejret skrift (/BaseFont inkl. "ABCDEF+"); "" = fallback
+    fallback: str = "helv"        # Base14-kode hvis den indlejrede ikke kan bruges
+    scale: float = 1.0            # vandret sammenpresning (1.0 = ingen)
+    angle: int = 0                # "inserttext": drejning, saa teksten staar vandret paa skaermen
+
+
+@dataclass(frozen=True)
 class AnnotationSpec:
     """A serialisable annotation.
 
@@ -53,6 +75,8 @@ class AnnotationSpec:
     # "manual" | "search" | "select_all" | "presidio" — provenance for review.
     source: str = "manual"
     uid: str = field(default_factory=lambda: uuid.uuid4().hex)
+    # Kun for kind == "textedit" / "inserttext".
+    edit: TextEdit | None = None
 
 
 @dataclass
@@ -452,6 +476,31 @@ def add_annotation_cmd(model: "EditModel", uid: str, spec: "AnnotationSpec") -> 
         model.remove_annotation(uid, spec.uid)
 
     return Command(N_("Tilføj annotation"), do, undo)
+
+
+def set_text_edit_cmd(model: "EditModel", uid: str, old: "AnnotationSpec | None",
+                      new: "AnnotationSpec | None",
+                      label: str = N_("Ret tekst")) -> Command:
+    """Erstat (eller tilfoej/fjern) en indholdsrettelse som ét undo-trin.
+
+    ``old`` er den eksisterende rettelse, ``new`` den nye; None paa den ene
+    side betyder tilfoej hhv. fjern (fx rettet tilbage til den oprindelige
+    tekst). Bruges af alle Rediger-vaerktoejerne; ``label`` er en uoversat
+    ``N_``-noegle.
+    """
+    def do():
+        if old is not None:
+            model.remove_annotation(uid, old.uid)
+        if new is not None:
+            model.add_annotation(uid, new)
+
+    def undo():
+        if new is not None:
+            model.remove_annotation(uid, new.uid)
+        if old is not None:
+            model.add_annotation(uid, old)
+
+    return Command(label, do, undo)
 
 
 def remove_annotation_cmd(model: "EditModel", uid: str, spec: "AnnotationSpec") -> Command:

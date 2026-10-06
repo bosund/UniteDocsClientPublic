@@ -453,6 +453,33 @@ def _i_tool_freetext(p):
     p.line((0.34, 0.86), (0.66, 0.86), caps=False)
 
 
+@icon("tool_edit_text")
+def _i_tool_edit_text(p):
+    # Ret tekst: to tekstlinjer og en I-bjaelke (skrivemarkoer) i den oeverste
+    p.line((0.12, 0.34), (0.56, 0.34), caps=False)
+    p.line((0.12, 0.70), (0.86, 0.70), caps=False)
+    p.line((0.74, 0.14), (0.74, 0.54), caps=False)
+    p.line((0.66, 0.14), (0.82, 0.14), caps=False)
+    p.line((0.66, 0.54), (0.82, 0.54), caps=False)
+
+
+@icon("tool_insert_text")
+def _i_tool_insert_text(p):
+    # Indsaet tekst: et "T" med et plus nederst til hoejre
+    p.line((0.12, 0.16), (0.62, 0.16), caps=False)
+    p.line((0.37, 0.16), (0.37, 0.80), caps=False)
+    p.line((0.76, 0.56), (0.76, 0.88), caps=False)
+    p.line((0.60, 0.72), (0.92, 0.72), caps=False)
+
+
+@icon("tool_erase")
+def _i_tool_erase(p):
+    # Slet omraade: et skraat viskelaeder over en grundlinje
+    p.poly([(0.20, 0.62), (0.52, 0.22), (0.82, 0.46), (0.50, 0.86)])
+    p.line((0.36, 0.42), (0.66, 0.66), caps=False)
+    p.line((0.10, 0.90), (0.90, 0.90), caps=False)
+
+
 @icon("tool_hand")
 def _i_tool_hand(p):
     # 4-vejs flytte-markoer (panorering)

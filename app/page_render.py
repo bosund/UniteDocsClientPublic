@@ -28,19 +28,31 @@ from collections import OrderedDict
 from PIL import Image
 
 from . import pdf_renderer
+from . import text_edit
 from .logging_config import get_logger
 
 logger = get_logger(__name__)
 
 
-def cache_key(path, page_index, rotation, box, crop=None):
+def cache_key(path, page_index, rotation, box, crop=None, edits=()):
     """Den ENE definition af render-cachens noegleform.
 
     ``crop`` er med, fordi to PageEdits kan dele kildeside med hver sin
     beskaering -- og fordi sidegitterets "er flisen forældet?"-test sammenligner
     noegler. ``invalidate_path``/``invalidate_page`` roerer kun k[0]/k[1] og er
-    derfor upaavirkede af at noeglen bliver laengere."""
-    return (path, page_index, rotation, box, tuple(crop) if crop else None)
+    derfor upaavirkede af at noeglen bliver laengere.
+
+    ``edits`` er sidens indholdsrettelser (:func:`content_edits_of`); de
+    aendrer selve billedet og indgaar med deres uid -- en spec faar ny uid naar
+    den rettes, saa uid'en er nok."""
+    return (path, page_index, rotation, box, tuple(crop) if crop else None,
+            tuple(s.uid for s in edits))
+
+
+def content_edits_of(page) -> tuple:
+    """En ``PageEdit``s indholdsrettelser (Rediger-gruppen) i den raekkefoelge
+    de blev lavet -- dem der skal bages ind i billedet."""
+    return tuple(a for a in page.annots if a.kind in text_edit.CONTENT_KINDS)
 
 
 class _LRU:
@@ -132,7 +144,7 @@ class PageRenderManager:
     # --- requests ---------------------------------------------------------
     def request(self, key, path, passwords, page_index, rotation, box, on_ready,
                 *, priority: int = 1, dpi: int = 90, generation: int | None = None,
-                crop=None):
+                crop=None, edits=()):
         """Queue a render. ``on_ready(key, pil_or_none)`` is scheduled on the main
         thread. ``box`` (w, h) downsizes the result (None keeps full size).
         ``priority`` 0 = preview (first), 1 = visible tile, 2 = prefetch.
@@ -141,7 +153,8 @@ class PageRenderManager:
         dele kildeside men have hver sin beskaering, saa udelades den, faar den ene
         den andens billede."""
         crop = tuple(crop) if crop else None
-        cached = self.cache.get(cache_key(path, page_index, rotation, box, crop))
+        edits = tuple(edits)
+        cached = self.cache.get(cache_key(path, page_index, rotation, box, crop, edits))
         if cached is not None:
             self.app._queue.put((on_ready, (key, cached)))
             return
@@ -149,7 +162,7 @@ class PageRenderManager:
             generation = self._current_generation()
         self._q.put((priority, next(self._seq),
                      (generation, key, path, tuple(passwords), page_index, rotation,
-                      box, dpi, on_ready, crop)))
+                      box, dpi, on_ready, crop, edits)))
 
     def _loop(self):
         while not self._stop.is_set():
@@ -160,7 +173,7 @@ class PageRenderManager:
             if payload is None:
                 break
             (generation, key, path, passwords, page_index, rotation, box, dpi,
-             on_ready, crop) = payload
+             on_ready, crop, edits) = payload
             if generation != self._current_generation():
                 continue                      # stale — page set changed, drop it
 
@@ -175,28 +188,29 @@ class PageRenderManager:
                     continue
                 try:
                     self._render_one(key, path, passwords, page_index, rotation,
-                                     box, dpi, on_ready, crop)
+                                     box, dpi, on_ready, crop, edits)
                 finally:
                     self._prefetch_sem.release()
                 time.sleep(0.005)             # gentle yield so prefetch stays polite
             else:
                 self._render_one(key, path, passwords, page_index, rotation, box,
-                                 dpi, on_ready, crop)
+                                 dpi, on_ready, crop, edits)
 
     def _render_one(self, key, path, passwords, page_index, rotation, box, dpi,
-                    on_ready, crop=None):
+                    on_ready, crop=None, edits=()):
         try:
             # Render at ~target size instead of a fixed dpi (huge speedup for large
             # pages); box is (w, h) of the tile/preview area.
             mpx = max(box) if box else None
             img = pdf_renderer.render_page(path, list(passwords), page_index,
                                            rotation=rotation, dpi=dpi, max_px=mpx,
-                                           crop=crop)
+                                           crop=crop, text_edits=edits)
             if img is not None and box is not None:
                 img = img.copy()
                 img.thumbnail(box, Image.Resampling.LANCZOS)
             if img is not None:
-                self.cache.put(cache_key(path, page_index, rotation, box, crop), img)
+                self.cache.put(cache_key(path, page_index, rotation, box, crop, edits),
+                               img)
             if self._stop.is_set():
                 return
             self.app._queue.put((on_ready, (key, img)))

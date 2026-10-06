@@ -53,8 +53,10 @@ def find_text_rects(page, query: str, *, allow_ocr: bool = True,
                     cache_path: str = "", cache_index: int = -1) -> list:
     """Rects (unrotated points) of every occurrence of ``query`` on ``page``.
 
-    The fast ``search_for`` path is unchanged. Only when it finds nothing *and*
-    the page looks like a scan do we pay for OCR.
+    The fast ``search_for`` path comes first; on a page whose text is what is
+    shown, its rects are clipped against the page's other words so a redaction
+    never touches a neighbouring line. Only
+    when it finds nothing *and* the page looks like a scan do we pay for OCR.
     """
     query = (query or "").strip()
     if not query:
@@ -65,7 +67,20 @@ def find_text_rects(page, query: str, *, allow_ocr: bool = True,
         logger.debug("search_for fejlede: %s", e)
         hits = []
     if hits:
-        return [_norm(r) for r in hits]
+        rects = [_norm(r) for r in hits]
+        # search_for's rects har skriftens fulde hoejde og rager ind i nabo-
+        # linjerne paa taet sat tekst, og apply_redactions() sletter ethvert
+        # tegn de roerer. Klip dem mod sidens ord -- se ocr_text.clip_to_page_words.
+        # Men kun naar teksten er det synlige: over en scanning skal billedet
+        # blankes i fuld hoejde.
+        if not ocr_text.text_layer_visible(page):
+            return rects
+        try:
+            words = page.get_text("words")
+        except Exception as e:
+            logger.debug("get_text('words') fejlede: %s", e)
+            return rects
+        return ocr_text.clip_to_page_words(rects, words)
 
     if not allow_ocr or not ocr_text.needs_ocr(page):
         return []

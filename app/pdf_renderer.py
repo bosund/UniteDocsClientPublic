@@ -7,6 +7,7 @@ from PIL import Image
 import pymupdf
 
 from . import pdf_utils
+from . import text_edit
 from . import theme
 from .logging_config import get_logger
 
@@ -178,7 +179,7 @@ def _apply_extra_rotation(img: Image.Image, rotation: int) -> Image.Image:
 
 def render_page(path: str, passwords: list[str], page_index: int,
                 rotation: int = 0, dpi: int = None, max_px: int = None,
-                crop=None) -> Optional[Image.Image]:
+                crop=None, text_edits=()) -> Optional[Image.Image]:
     """Render a single PDF page (or an image file's only page) as a PIL image.
 
     Pass ``max_px`` to render at ~target size (fast for tiles/preview) instead of a
@@ -190,7 +191,12 @@ def render_page(path: str, passwords: list[str], page_index: int,
     nedad. For PDF omregnes det til ``get_pixmap(clip=)``, som vil have rektanglet
     i VISNINGS-rummet (efter /Rotate) -- maalt empirisk: ``rect * rotation_matrix``
     giver de rigtige maal ved alle fire /Rotate-vaerdier, mens det raa rektangel
-    beskaerer det forkerte omraade ved 90/270. For billeder er enheden PIL-pixels."""
+    beskaerer det forkerte omraade ved 90/270. For billeder er enheden PIL-pixels.
+
+    ``text_edits`` er sidens tekstrettelser. De bages ind i en kopi af siden
+    foer rasteriseringen, med praecis den kode gem bruger -- et overlay malet
+    oven paa den gamle tekst ville ikke kunne vise en farvet baggrund, og det
+    ville kunne vise noget andet end det der bliver gemt."""
     suffix = Path(path).suffix.lower()
     if suffix != '.pdf':
         if suffix in SUPPORTED_IMAGE_EXT:
@@ -213,10 +219,17 @@ def render_page(path: str, passwords: list[str], page_index: int,
         doc = _doc_cache.get_or_open(path, passwords)
         if not doc:
             return None
+        tmp = None
         try:
             if not (0 <= page_index < doc.page_count):
                 return None
             page = doc[page_index]
+            if text_edits:
+                # Det cachede dokument maa ikke aendres: kopiér siden ud.
+                tmp = pymupdf.open()
+                tmp.insert_pdf(doc, from_page=page_index, to_page=page_index)
+                page = tmp[0]
+                text_edit.apply(page, text_edits)
             clip = _clip_for(page, crop)
             zoom = _zoom_for(page, dpi=dpi, max_px=max_px, rect=clip)
             pix = page.get_pixmap(matrix=pymupdf.Matrix(zoom, zoom), clip=clip,
@@ -225,6 +238,9 @@ def render_page(path: str, passwords: list[str], page_index: int,
         except Exception as e:
             _log(f"Side-rendering fejlede: {type(e).__name__}: {e}")
             return None
+        finally:
+            if tmp is not None:
+                tmp.close()
 
 
 def page_words(path, passwords, page_index):
@@ -242,6 +258,65 @@ def page_words(path, passwords, page_index):
         except Exception as e:
             _log(f'page_words fejlede: {e}')
             return []
+
+
+def page_text_visible(path, passwords, page_index) -> bool:
+    """Er sidens tekst synlig (ikke et skjult OCR-lag over en scanning)?
+    Afgoer om en maskering maa klippes fri af nabolinjerne -- se
+    ``ocr_text.text_layer_visible``. False ved fejl og for billeder."""
+    if Path(path).suffix.lower() != '.pdf':
+        return False
+    from . import ocr_text
+    with PDF_LOCK:
+        doc = _doc_cache.get_or_open(path, passwords)
+        if not doc or not (0 <= page_index < doc.page_count):
+            return False
+        return ocr_text.text_layer_visible(doc[page_index])
+
+
+def page_lines(path, passwords, page_index) -> list:
+    """Sidens tekstlinjer til tekstrettelse (``text_edit.Line``) i A-space.
+    Billigt, ingen rasterisering. [] ved fejl og for billeder."""
+    if Path(path).suffix.lower() != '.pdf':
+        return []
+    with PDF_LOCK:
+        doc = _doc_cache.get_or_open(path, passwords)
+        if not doc or not (0 <= page_index < doc.page_count):
+            return []
+        try:
+            return text_edit.lines_on_page(doc[page_index])
+        except Exception as e:
+            _log(f'page_lines fejlede: {e}')
+            return []
+
+
+def plan_text_edit(path, passwords, page_index, line, new_text):
+    """``text_edit.plan`` mod kildesiden (skrifterne slaas op i dens
+    ressourcer). None ved fejl eller ingen aendring."""
+    with PDF_LOCK:
+        doc = _doc_cache.get_or_open(path, passwords)
+        if not doc or not (0 <= page_index < doc.page_count):
+            return None
+        try:
+            return text_edit.plan(doc[page_index], line, new_text)
+        except Exception as e:
+            logger.warning("Tekstrettelse kunne ikke beregnes: %s", e)
+            return None
+
+
+def plan_insert_text(path, passwords, page_index, lines, x, y, text, angle=0,
+                     origin=None):
+    """``text_edit.plan_insert`` mod kildesiden. None ved fejl eller tom tekst."""
+    with PDF_LOCK:
+        doc = _doc_cache.get_or_open(path, passwords)
+        if not doc or not (0 <= page_index < doc.page_count):
+            return None
+        try:
+            return text_edit.plan_insert(doc[page_index], lines, x, y, text,
+                                         angle=angle, origin=origin)
+        except Exception as e:
+            logger.warning("Indsat tekst kunne ikke beregnes: %s", e)
+            return None
 
 
 def page_geometry(path: str, passwords: list[str], page_index: int):

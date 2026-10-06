@@ -589,7 +589,8 @@ class ThumbnailGrid(QAbstractScrollArea):
         ``tile_img`` indgaar, fordi stoerrelsen kan aendres af skyderen -- to
         skalaer maa ikke dele samme cache-post."""
         return page_render.cache_key(page.src_path, page.src_index, page.rotation,
-                                     self.tile_img, page.crop)
+                                     self.tile_img, page.crop,
+                                     page_render.content_edits_of(page))
 
     def _on_scrolled(self) -> None:
         self.render_mgr.notify_activity()   # pause prefetch, saa scroll er glat
@@ -614,7 +615,8 @@ class ThumbnailGrid(QAbstractScrollArea):
                 continue
             self.render_mgr.request(page.uid, page.src_path, pw, page.src_index,
                                     page.rotation, self.tile_img, self.on_tile_ready,
-                                    priority=1, generation=gen, crop=page.crop)
+                                    priority=1, generation=gen, crop=page.crop,
+                                    edits=page_render.content_edits_of(page))
 
     def _prefetch(self) -> None:
         """Varm cachen op ved lav prioritet. Synlige fliser (pri 1) og
@@ -632,7 +634,8 @@ class ThumbnailGrid(QAbstractScrollArea):
                 continue
             self.render_mgr.request(page.uid, page.src_path, pw, page.src_index,
                                     page.rotation, self.tile_img, self.on_tile_ready,
-                                    priority=2, generation=gen, crop=page.crop)
+                                    priority=2, generation=gen, crop=page.crop,
+                                    edits=page_render.content_edits_of(page))
             count += 1
             if count >= PREFETCH_CAP:
                 break
@@ -1250,7 +1253,10 @@ class FileDetailsView(QTreeWidget):
                                 else Qt.SortOrder.AscendingOrder))
 
     def _set_header_labels(self) -> None:
-        self.setHeaderLabels([_("Filnavn"), _("Oprettet"), _("Dato i filnavn"),
+        # "Dokumentdato", ikke "Oprettet": kolonnen er PDF'ens egen dato (med
+        # filens aendringstid som reserve), mens Power-sorteringens "Oprettet"
+        # er filsystemets oprettelsestid.
+        self.setHeaderLabels([_("Filnavn"), _("Dokumentdato"), _("Dato i filnavn"),
                               _("Sider")])
         self.headerItem().setTextAlignment(
             self.COL_PAGES, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
@@ -1812,6 +1818,12 @@ class PageView(QWidget):
         self.pcanvas.set_document()
         self._update_welcome()
 
+    def refresh_page_images(self) -> None:
+        """Bestil fliserne igen hvor billedet er forældet (fx efter en
+        tekstrettelse, som indgaar i flisens noegle). Kun de synlige -- resten
+        sammenlignes alligevel med noeglen naar de rulles frem."""
+        self.grid._request_visible_renders()
+
     def refresh_header(self, iid) -> None:
         """Hovedet males af gitteret, saa en gentegning er alt der skal til.
         Fillisten viser samme navn/dato/haengelaas og opdateres med."""
@@ -2158,6 +2170,13 @@ class PageView(QWidget):
         tool_btn(mr, "highlight", "tool_highlight", _("Fremhæv"))
         tool_btn(mr, "underline", "tool_underline", _("Understreg"))
         tool_btn(mr, "strikeout", "tool_strike", _("Gennemstreg"))
+        sep()
+
+        # --- Rediger (ændrer selve sideindholdet; Marker lægger kun noget oven på) ---
+        rr = group(_("Rediger"))
+        tool_btn(rr, "edit_text", "tool_edit_text", _("Ret tekst"))
+        tool_btn(rr, "insert_text", "tool_insert_text", _("Indsæt tekst"))
+        tool_btn(rr, "erase", "tool_erase", _("Slet område"))
         sep()
 
         # --- Masker (redaction) + soegning ---

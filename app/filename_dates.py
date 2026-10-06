@@ -4,11 +4,11 @@ GUI-frit (ingen Qt), saa det testes headless fra ``tests/test_suite.py``.
 
 To veje til en :class:`DateRule`:
 
-* :func:`detect_rule` proever en raekke kendte formater (``31062022``,
-  ``2022-06-31``, ``31. juni 2022``, ``June 30, 2022`` ...) mod ALLE filnavnene
+* :func:`detect_rule` proever en raekke kendte formater (``30062022``,
+  ``2022-06-30``, ``30. juni 2022``, ``June 30, 2022`` ...) mod ALLE filnavnene
   og vaelger det der giver en gyldig dato i flest af dem. Det er hele pointen
   med at se paa samlingen frem for det enkelte navn: ``01062022`` kan vaere
-  baade dd-mm og mm-dd, men ``31062022`` i naboen kan kun vaere dd-mm.
+  baade dd-mm og mm-dd, men ``30062022`` i naboen kan kun vaere dd-mm.
 * :func:`rule_from_marks` bygger reglen af de tegn brugeren selv har markeret
   i ét eksempel ("Manuel").
 
@@ -225,6 +225,23 @@ class ChainRule:
         return None
 
 
+def _month_year_over_day20(primary, scored, names, today) -> DateRule:
+    """``062022`` er juni 2022, ikke 20. juni 2022.
+
+    Seks cifre ``mm20yy`` passer baade ``mmddyy`` (dag 20) og ``mmyyyy``
+    (aar 20yy), og ved lige mange fund vinder formatet med dag. Er HVER dato
+    ``mmddyy`` finder den 20., er det aarhundredet den har laest som dag --
+    saa vinder ``mmyyyy``, hvis den passer mindst lige saa mange navne."""
+    days = [d for d in (primary.parse(n, today) for n in names) if d is not None]
+    if not days or any(d.day != 20 for d in days):
+        return primary
+    hits = len(days)
+    for neg_hits, _no_day, _prio, rule in scored:
+        if rule.key == "mmyyyy" and -neg_hits >= hits:
+            return rule
+    return primary
+
+
 def detect_rule(names, today: datetime.date | None = None) -> "Detection | None":
     """Find det datoformat der passer flest af ``names`` (filnavne uden sti).
 
@@ -242,8 +259,14 @@ def detect_rule(names, today: datetime.date | None = None) -> "Detection | None"
         return None
     scored.sort(key=lambda t: t[:3])
     primary = scored[0][3]
-    chain = [primary] + [r for *_k, r in scored[1:]
-                         if not (primary.order and r.order and r.order != primary.order)]
+    passed_over = None
+    if primary.key == "mmddyy":
+        primary = _month_year_over_day20(primary, scored, names, today)
+        if primary is not scored[0][3]:
+            passed_over = scored[0][3]     # maa heller ikke vaere reserve
+    chain = [primary] + [r for *_k, r in scored
+                         if r is not primary and r is not passed_over
+                         and not (primary.order and r.order and r.order != primary.order)]
     rule = ChainRule(chain)
     hits = sum(1 for n in names if rule.parse(n, today) is not None)
     return Detection(rule, hits, len(names))

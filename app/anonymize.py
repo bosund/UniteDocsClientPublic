@@ -213,23 +213,34 @@ def role_hint(text: str, start: int, end: int) -> str:
     return ""
 
 
-def _page_words(path, kind, src_index, rotation, passwords, cancel):
-    """``(ord, brugte_ocr)`` for én side. Kalderen skal holde ``PDF_LOCK``."""
+def _page_words(path, kind, src_index, rotation, passwords, cancel,
+                allow_ocr=True):
+    """``(ord, brugte_ocr, klip)`` for én side. Kalderen skal holde ``PDF_LOCK``.
+
+    ``klip`` er sand naar maskeringen maa klippes fri af nabolinjerne
+    (``ocr_text.rects_for_span(..., clip=True)``) -- kun naar siden har et
+    synligt tekstlag. Paa en scanning er det billedet der skal blankes.
+
+    ``allow_ocr=False`` springer scanninger over: et billede har intet
+    tekstlag, og en PDF-side uden tekstlag giver kun sine (faa) native ord.
+    """
     from . import pdf_renderer
     if kind == em.KIND_IMAGE:
+        if not allow_ocr:
+            return [], False, False
         words = ocr_text.image_words_a_space(path, rotation_hint=rotation,
                                              cancel=cancel)
-        return words, bool(words)
+        return words, bool(words), False
 
     doc = pdf_renderer._doc_cache.get_or_open(path, passwords)
     if doc is None or src_index >= doc.page_count:
-        return [], False
+        return [], False, False
     page = doc[src_index]
-    used_ocr = ocr_text.needs_ocr(page)
+    used_ocr = allow_ocr and ocr_text.needs_ocr(page)
     words = ocr_text.page_words_a_space(
-        page, rotation_hint=rotation, cancel=cancel,
+        page, allow_ocr=allow_ocr, rotation_hint=rotation, cancel=cancel,
         cache_path=path, cache_index=src_index)
-    return words, used_ocr
+    return words, used_ocr, (not used_ocr and ocr_text.text_layer_visible(page))
 
 
 def scan(jobs, passwords, *, allow_ocr=True, on_progress=None, cancel=None) -> ScanResult:
@@ -251,13 +262,14 @@ def scan(jobs, passwords, *, allow_ocr=True, on_progress=None, cancel=None) -> S
             # Laasen holdes KUN om MuPDF-arbejdet; analysen nedenfor er ren
             # Python og maa ikke blokere miniature-optegningen.
             with pdf_renderer.PDF_LOCK:
-                words, used_ocr = _page_words(path, kind, src_index, rotation,
-                                              passwords, cancel)
+                words, used_ocr, clip = _page_words(path, kind, src_index,
+                                                    rotation, passwords, cancel,
+                                                    allow_ocr)
         except Exception as e:
             logger.warning("Kunne ikke laese tekst fra %s side %s: %s",
                            path, src_index, e)
             failed += 1
-            words, used_ocr = [], False
+            words, used_ocr, clip = [], False, False
 
         scanned += 1
         if used_ocr:
@@ -282,7 +294,8 @@ def scan(jobs, passwords, *, allow_ocr=True, on_progress=None, cancel=None) -> S
                 logger.warning("Analysen fejlede paa %s: %s", label, e)
                 spans = []
             for s in spans:
-                rects = ocr_text.rects_for_span(words, offsets, s.start, s.end)
+                rects = ocr_text.rects_for_span(words, offsets, s.start, s.end,
+                                                clip=clip)
                 if not rects:
                     continue
                 value = text[s.start:s.end]
@@ -297,7 +310,7 @@ def scan(jobs, passwords, *, allow_ocr=True, on_progress=None, cancel=None) -> S
         if on_progress is not None:
             on_progress(i + 1, total, label)
 
-    findings += _propagate_names(findings, sider, passwords, cancel)
+    findings += _propagate_names(findings, sider, passwords, cancel, allow_ocr)
     return ScanResult(tuple(findings), scanned, ocred, failed, False,
                       english, english_missing)
 
@@ -347,7 +360,7 @@ def name_variants(findings) -> dict:
             for m, k in ejere.items()}
 
 
-def _propagate_names(findings, sider, passwords, cancel) -> list:
+def _propagate_names(findings, sider, passwords, cancel, allow_ocr=True) -> list:
     """Anden gennemloeb: find de kendte navne paa de sider hvor de blev overset."""
     from . import pdf_renderer
 
@@ -372,8 +385,11 @@ def _propagate_names(findings, sider, passwords, cancel) -> list:
         # ocr_text goer det gratis for de fleste dokumenter.
         try:
             with pdf_renderer.PDF_LOCK:
-                words, _ocr = _page_words(path, kind, src_index, rotation,
-                                          passwords, cancel)
+                # Samme allow_ocr som foerste gennemloeb, ellers passer
+                # offsets ikke til ``text``.
+                words, _ocr, clip = _page_words(path, kind, src_index,
+                                                rotation, passwords, cancel,
+                                                allow_ocr)
         except Exception as e:
             logger.warning("Kunne ikke genlaese %s: %s", label, e)
             continue
@@ -385,7 +401,8 @@ def _propagate_names(findings, sider, passwords, cancel) -> list:
             uid = "%s:%d:%d" % (page_uid, m.start(), m.end())
             if any(uid == f.uid for f in eksisterende):
                 continue
-            rects = ocr_text.rects_for_span(words, offsets, m.start(), m.end())
+            rects = ocr_text.rects_for_span(words, offsets, m.start(), m.end(),
+                                            clip=clip)
             if not rects:
                 continue
             if any(_rects_overlap(rects, f.rects) for f in eksisterende):
