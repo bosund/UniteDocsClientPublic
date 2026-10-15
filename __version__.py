@@ -5,11 +5,16 @@ Unite Docs - Version Information
 # ENESTE kilde til versionsnummeret. Compileren (compiler/kompilerv3.py) laeser
 # denne linje via regex, og app/__init__.py + unitedocs.py importerer den — så
 # tallet vedligeholdes kun ét sted. __version_info__ udledes af strengen.
-__version__ = "9.4.3"
+__version__ = "9.4.4"
 __version_info__ = tuple(int(p) for p in __version__.split(".") if p.isdigit())
 
 # Release notes for this version
 RELEASE_NOTES = """
+Version 9.4.4 - Rettelse
+- RETTET: Programmet sagde ikke selv til, når der var en ny version, hvis det
+  stod åbent i flere dage. Nu søges der efter opdateringer én gang i døgnet,
+  også mens programmet er åbent.
+
 Version 9.4.3 - Rettelse
 - RETTET: Filer kunne ikke trækkes fra Stifinder ind i vinduet, når der
   ikke var åbne filer.

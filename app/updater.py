@@ -55,8 +55,18 @@ VERSION_URL = "https://www.uniteapps.dk/api/unitedocs/version"
 DOWNLOAD_URL = "https://www.uniteapps.dk/api/unitedocs/download"
 INFO_URL = "https://www.uniteapps.dk/unitedocs"
 
-#: Der gaar en uge mellem to automatiske tjek.
-CHECK_INTERVAL_S = 7 * 24 * 3600
+#: Der gaar et doegn mellem to automatiske tjek. Det var en uge, men regnet fra
+#: sidste FORSOEG betoed det at en version udgivet dagen efter et tjek foerst
+#: blev tilbudt op til otte dage senere.
+CHECK_INTERVAL_S = 24 * 3600
+
+#: Hvor ofte en koerende app spoerger sig selv om det er tid til et tjek.
+#: Selve doegnreglen haandhaeves af ``CHECK_INTERVAL_S``; dette er kun hvor
+#: hurtigt en app der staar aaben i dagevis opdager at doegnet er gaaet.
+POLL_INTERVAL_S = 3600
+
+#: Downloadede installere og halve downloads ryddes efter en uge.
+DOWNLOAD_MAX_AGE_S = 7 * 24 * 3600
 
 #: Undermappe under ``utils.get_app_data_path()`` hvor installere hentes ned.
 DOWNLOAD_SUBDIR = "updates"
@@ -518,7 +528,7 @@ def launch_installer(setup_path, app_exe=None, helper_dir=None) -> bool:
 # Oprydning
 # ---------------------------------------------------------------------------
 
-def purge_old_downloads(dest_dir, keep=None, max_age_s=CHECK_INTERVAL_S) -> None:
+def purge_old_downloads(dest_dir, keep=None, max_age_s=DOWNLOAD_MAX_AGE_S) -> None:
     """Ryd gamle installere og halve downloads.
 
     ``utils.purge_stale_temp_files`` roerer kun ``split_cache_*`` og ``*.tmp``

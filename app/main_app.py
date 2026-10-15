@@ -175,9 +175,11 @@ class MainWindow(QMainWindow):
         QTimer.singleShot(200, self._start_ipc)
         # Opdateringstjekket skal ikke kappes om CPU'en med foerste optegning,
         # IPC-starten eller indlaesningen af initial_files.
+        # Foerste tjek efter 8 s, derefter spoerges der hver time: appen staar
+        # typisk aaben i dagevis, og et tjek der kun koerte ved opstart naaede
+        # aldrig frem til dem der ikke lukker den.
         self._update_timer = QTimer(self)
-        self._update_timer.setSingleShot(True)
-        self._update_timer.timeout.connect(self.start_update_check)
+        self._update_timer.timeout.connect(self._on_update_timer)
         self._update_timer.start(8000)
 
     # ------------------------------------------------------------------
@@ -530,8 +532,17 @@ class MainWindow(QMainWindow):
     def _updates_dir(self) -> Path:
         return utils.get_app_data_path(updater.DOWNLOAD_SUBDIR)
 
+    def _on_update_timer(self) -> None:
+        self._update_timer.setInterval(updater.POLL_INTERVAL_S * 1000)
+        # Midt i en anden modal dialog (anonymisering, gem, kodeord) skal der
+        # ikke springe en opdateringsdialog op oven i. last_check roeres ikke,
+        # saa der proeves igen ved naeste runde.
+        if QApplication.activeModalWidget() is not None:
+            return
+        self.start_update_check()
+
     def start_update_check(self, manual: bool = False) -> None:
-        """Ugentligt (eller manuelt udloest) tjek for en nyere version."""
+        """Dagligt (eller manuelt udloest) tjek for en nyere version."""
         if self._update_busy:
             if manual:
                 self.set_status(_("Søger allerede efter opdateringer…"), transient_ms=4000)
@@ -547,7 +558,7 @@ class MainWindow(QMainWindow):
                 return
 
         # Stemplet saettes FOER tjekket, ikke efter. Ellers ville en netvaerksfejl
-        # betyde et nyt forsoeg ved hver eneste opstart i stedet for om en uge.
+        # betyde et nyt forsoeg hver time i stedet for i morgen.
         self.config.set("Updates", "last_check", str(int(time.time())))
         self.config.save()
 

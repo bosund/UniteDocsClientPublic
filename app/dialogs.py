@@ -839,7 +839,7 @@ class SettingsDialog(QDialog):
 
     def _build_updates_section(self) -> None:
         self._section(_("Opdateringer"))
-        auto = QCheckBox(_("Søg automatisk efter opdateringer (én gang om ugen)"), self)
+        auto = QCheckBox(_("Søg automatisk efter opdateringer (én gang om dagen)"), self)
         auto.setChecked(self.app.config.getboolean("Updates", "auto_check", fallback=True))
 
         def toggled(on: bool) -> None:
